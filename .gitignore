@@ -4,3 +4,4 @@ out/
 *.db-*
 .bridge/
 bridge.yaml
+tmp/

@@ -182,5 +182,9 @@ Contributing: see [AGENTS.md](AGENTS.md).
 
 - Discord adapter; Telegram tested end to end
 - Codex wrapper, A2A, webhook SSE streaming
-- Config-editing CLI commands (`connect`, `add`, `link`, `allow`); edit `bridge.yaml` directly
 - Strict policy on `tainted` envelopes (today the flag only keeps `initiator` from approving)
+
+## Not planned
+
+- Config-editing commands (`add`, `link`, `allow`, `grant`): you or a coding agent edit `bridge.yaml` directly.
+- A cloud relay or hosted service, and bridges on several machines sharing one bot: bridge runs on your own machine.

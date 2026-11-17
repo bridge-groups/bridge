@@ -1,7 +1,7 @@
 {
   "name": "bridge",
   "version": "0.1.0",
-  "description": "Connect agents to IM, to other agents, and to tools \u2014 one local process, one bridge.yaml.",
+  "description": "Connect agents to IM, to other agents, and to tools — one local process, one bridge.yaml.",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -29,6 +29,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@canons-dev/canons": "^0.2.1",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }

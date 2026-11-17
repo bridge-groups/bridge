@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "locale": "en",
+  "clients": [
+    "codex",
+    "claude"
+  ],
+  "runner": "local"
+}
