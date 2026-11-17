@@ -56,6 +56,7 @@ policies:
 ```
 
 ```bash
+node out/cli.js slack manifest               # paste at api.slack.com/apps → From a manifest; the app is named "Bridge"
 node out/cli.js secret set slack_app_token   # macOS keychain; elsewhere export BRIDGE_SECRET_SLACK_APP_TOKEN
 node out/cli.js routes explain --from slack:#dev --sender alice --mention
 node out/cli.js up
@@ -68,7 +69,7 @@ Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `
 ### Feishu / Lark
 
 ```bash
-node out/cli.js feishu setup   # app features, scopes to import, events and callbacks to subscribe
+node out/cli.js feishu setup   # app name ("Bridge"), features, scopes to import, events and callbacks to subscribe
 ```
 
 Replies are message cards (progress edits in place, approval buttons); headings and tables are rewritten for card markdown. People are mapped by open_id: `people: { alice: { feishu: ou_xxx } }` — `up` prints the open_id of anyone it ignores.

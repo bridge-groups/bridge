@@ -371,7 +371,7 @@ function readSecretValue(prompt: string): Promise<string> {
   });
 }
 
-const FEISHU_SETUP = `Feishu (open.feishu.cn/app) or Lark (open.larksuite.com/app) → Create custom app, then:
+const FEISHU_SETUP = `Feishu (open.feishu.cn/app) or Lark (open.larksuite.com/app) → Create custom app named "Bridge", then:
 
 1. Add features → Bot.
 2. Permissions & Scopes → batch import (批量导入/导出权限), paste:
