@@ -78,6 +78,7 @@ uses, `npm run build && node out/cli.js service restart`.
 
 ## Git workflow
 
-- Commit directly to `main` and push; no feature branches or pull requests. Keep history linear.
+- Never open a GitHub pull request unless the user explicitly asks for one: commit directly to `main` and push.
+  No feature branches. Keep history linear.
 - One logical change per commit, with a message that says what changed and why.
 - Never commit build output, local config, databases or secrets.
