@@ -75,6 +75,7 @@ button:disabled { opacity: .5; cursor: default; }
 .ev.inbound .kind { color: var(--accent); }
 .ev.reply .kind { color: var(--ok); }
 .ev.error .kind, .ev.approval .kind, .ev.budget .kind { color: var(--danger); }
+.ev.config .kind { color: var(--warn); }
 .ev.tool_call .kind, .ev.tool_result .kind { color: var(--warn); }
 .ev details summary { cursor: pointer; color: var(--muted); }
 .ev pre { margin: 4px 0 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -189,10 +190,12 @@ button:disabled { opacity: .5; cursor: default; }
     $('updated').textContent = 'updated ' + clock(Date.now());
   }
 
-  function renderChoices(list) {
-    $('approvals').hidden = !list.length;
-    $('approvals-count').textContent = list.length;
+  function renderChoices(list, config) {
+    var pending = config && config.pending;
+    $('approvals').hidden = !list.length && !pending;
+    $('approvals-count').textContent = list.length + (pending ? 1 : 0);
     var box = clear($('approvals-list'));
+    if (pending) box.appendChild(configRow(pending));
     list.forEach(function (c) {
       var k = describeKey(c.key);
       var buttons = c.choices.map(function (o) {
@@ -215,6 +218,31 @@ button:disabled { opacity: .5; cursor: default; }
         ]),
       ]));
     });
+  }
+
+  // A bridge.yaml change that widens access: apply or reject it as the owner.
+  function configRow(p) {
+    var lines = p.changes.map(function (c) {
+      return (c.widens ? '+ ' : c.kind === 'removed' ? '- ' : '~ ') + c.section + ' ' + c.kind + ': ' + c.key;
+    });
+    function decide(action, label) {
+      return function (ev) {
+        ev.target.disabled = true;
+        api('/api/config/' + action, { sha: p.sha })
+          .then(function () { toast(label + ' — done.'); refresh(); })
+          .catch(function (e) { ev.target.disabled = false; toast(e.message, true); });
+      };
+    }
+    return el('div', { class: 'row' }, [
+      el('div', { class: 'main' }, [
+        el('div', { class: 'sub', text: 'bridge.yaml change ' + p.sha + ' · waiting since ' + ago(p.at) + ' · "+" widens access' }),
+        el('div', { class: 'prompt', text: lines.join('\n') }),
+        el('div', { class: 'actions', style: 'justify-content:flex-start' }, [
+          el('button', { class: 'primary', text: 'Apply', onclick: decide('apply', 'Applied') }),
+          el('button', { class: 'danger', text: 'Reject', onclick: decide('reject', 'Rejected') }),
+        ]),
+      ]),
+    ]);
   }
 
   // In-page confirmation (native confirm() is blocked in embedded browsers).
@@ -286,6 +314,7 @@ button:disabled { opacity: .5; cursor: default; }
       if (kind === 'choice') return { text: d.outcome };
       if (kind === 'ignored') return { text: d.text, note: 'no route' };
       if (kind === 'command') return { text: d.command };
+      if (kind === 'config') return { text: d.outcome + ' ' + d.sha + (d.by ? ' by ' + d.by : ''), raw: (d.changes || []).map(function (c) { return (c.widens ? '+ ' : c.kind === 'removed' ? '- ' : '~ ') + c.section + ' ' + c.kind + ': ' + c.key; }).join('\n') };
       if (kind === 'budget') return { text: 'turn not started: ' + money(d.leftUsd) + ' of ' + money(d.budgetUsd) + ' left' + (d.cheapestTurnUsd != null ? ', cheapest recent turn ' + money(d.cheapestTurnUsd) : '') };
       if (kind === 'error') return { text: d.message || d.error || detail };
     }
@@ -370,7 +399,7 @@ button:disabled { opacity: .5; cursor: default; }
     return api('/api/overview').then(function (o) {
       lastOverview = o;
       renderStatus(o.status);
-      renderChoices(o.choices);
+      renderChoices(o.choices, o.config);
       renderSessions(o.sessions);
       return loadTrace();
     }).catch(function () {

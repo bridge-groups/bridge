@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { OAuthFlows } from '../mcp/oauth.ts';
 import { PAGE } from './page.ts';
+import type { ConfigChange } from '../config/changes.ts';
+import type { PendingConfig } from '../config/gate.ts';
 
 export interface WebSession {
   key: string;
@@ -46,6 +48,10 @@ export interface WebBackend {
   /** preview: what would happen; otherwise do it (queued behind the conversation's turns). */
   webWorkspace(key: string, action: 'merge' | 'discard', preview: boolean): Promise<string>;
   webTools(): Promise<WebTool[]>;
+  /** The bridge.yaml change waiting for an owner, if any. */
+  webConfig(): { pending: PendingConfig | null };
+  /** Apply (or reject) the config file whose text has `sha`, as the owner. */
+  webConfigDecide(sha: string, action: 'apply' | 'reject', via: 'web' | 'cli'): { changes: ConfigChange[] };
   oauth: OAuthFlows;
 }
 
@@ -88,13 +94,14 @@ export async function handleWeb(b: WebBackend, req: IncomingMessage, res: Server
       return json(res, 200, { status: b.oauth.status(signIn[1]!), last: b.oauth.lastResult(signIn[1]!) ?? null });
     }
     if (path === '/api/overview' && req.method === 'GET') {
-      return json(res, 200, { status: b.status(), sessions: await b.webSessions(), choices: b.webChoices() });
+      return json(res, 200, { status: b.status(), sessions: await b.webSessions(), choices: b.webChoices(), config: b.webConfig() });
     }
     if (path === '/api/trace' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 200) || 200, 2000);
       return json(res, 200, b.webTrace(url.searchParams.get('session') ?? undefined, limit));
     }
     if (path === '/api/tools' && req.method === 'GET') return json(res, 200, await b.webTools());
+    if (path === '/api/config' && req.method === 'GET') return json(res, 200, b.webConfig());
 
     if (req.method === 'POST') {
       const body = (await readJson(req)) as Record<string, unknown>;
@@ -104,6 +111,11 @@ export async function handleWeb(b: WebBackend, req: IncomingMessage, res: Server
       if (ws) {
         const key = String(body.key ?? '');
         return json(res, 200, { text: await b.webWorkspace(key, ws[1] as 'merge' | 'discard', body.preview === true) });
+      }
+      const config = /^\/api\/config\/(apply|reject)$/.exec(path);
+      if (config) {
+        const via = body.via === 'cli' ? 'cli' : 'web';
+        return json(res, 200, b.webConfigDecide(String(body.sha ?? ''), config[1] as 'apply' | 'reject', via));
       }
       if (path === '/api/oauth/sign-out') {
         b.oauth.signOut(String(body.server ?? ''));

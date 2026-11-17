@@ -1,9 +1,13 @@
 import { fileURLToPath } from 'node:url';
 
+import { SCHEMA_FILE } from './config/json-schema.ts';
+
 /** The bundled example agent; resolves from src/ and from the compiled out/ alike. */
 const ECHO_AGENT = fileURLToPath(new URL('../src/examples/echo-agent.mjs', import.meta.url));
 
-export const TEMPLATE = `# bridge config. Edit, then: bridge doctor && bridge up
+export const TEMPLATE = `# yaml-language-server: $schema=${SCHEMA_FILE}
+# bridge config. You or a coding agent edit it; "bridge check" lists problems and what an edit changes.
+# A running bridge applies edits on save; edits that widen access wait for an owner to confirm them.
 version: 1
 
 # Who is who across IMs. Routes and approvals refer to these ids.
@@ -65,6 +69,13 @@ policies: []
   # - match: { agent: "*" }
   #   max_hops: 4
   #   budget_usd: 2
+
+# Assertions about the routes above, checked on every load: a file whose tests fail is not applied.
+tests:
+  - { from: local:dm, sender: me, expect: echo }
+  - { from: local:dm, sender: stranger, expect: none }
+  # - { from: slack:#random, sender: me, mention: true, expect: none }
+  # - { agent: claude-code, calls: github.create_issue, expect: allow }
 
 defaults:
   dm_idle_reset: 2h

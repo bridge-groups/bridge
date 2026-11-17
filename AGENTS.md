@@ -81,7 +81,7 @@ User-facing docs are in [README.md](README.md); design notes and references live
 ```
 src/                     all source code
   cli.ts                 commands (bridge init | up | chat | doctor | auth | dashboard | service | …)
-  config/                bridge.yaml schema (zod) and semantic checks
+  config/                bridge.yaml schema (zod), checks with line numbers, tests, change review
   core/                  router, policies, SQLite store, the Bridge orchestrator
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
   web/                   local dashboard: JSON API + one self-contained page
@@ -89,7 +89,7 @@ src/                     all source code
   adapters/agent/        claude-code (with git worktrees), webhook, stdio
   examples/              example agents (shipped)
   test/                  node:test suites, helpers and fixtures (not shipped)
-doc/                     documentation and reference files
+doc/                     documentation and reference files (bridge.schema.json is generated: `bridge schema`)
 out/                     build output (git-ignored)
 tmp/                     scratch files, one-off scripts, handoffs (git-ignored)
 .agents/                 agent rules and skills (canons); CLAUDE.md and .claude/ link here

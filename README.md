@@ -21,6 +21,7 @@ Each agent turn gets a session-scoped MCP endpoint (`/mcp/<token>`) with these t
 ```bash
 npm install && npm run build
 node out/cli.js init            # writes bridge.yaml with a local echo agent
+node out/cli.js check           # problems with line numbers, the file's tests, what an edit changes
 node out/cli.js doctor
 node out/cli.js chat --as me    # talk to your routes from the terminal
 ```
@@ -65,6 +66,8 @@ node out/cli.js up
 Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `deny` / `yes` also work). A `budget_usd` policy is a per-conversation cap: each turn is started with only what is left (Claude Code gets it as `--max-budget-usd`). Agents check their cap between model requests, so a turn can end up to one request over it; to keep that from happening, a turn starts only when what is left covers the agent's cheapest recent turn. A refused turn is answered in the chat and recorded in the audit trail as `budget`.
 
 `bridge.yaml` is hot-reloaded. An agent whose settings changed gets a new process for its next turn; turns already running finish on the old one. Changing IM credentials needs a restart.
+
+You, or a coding agent, edit `bridge.yaml` directly; there are no config-editing commands. `node out/cli.js check` lists every problem with its line, runs the file's `tests` (assertions such as "a stranger in #dev reaches no agent"), and shows what the edit changes against the running config. Edits that only narrow access apply on save. Edits that widen it (a new route or person, a changed agent, a removed policy) wait for an owner: Apply / Reject buttons in each owner's DM with the bot, the dashboard, or `node out/cli.js check --apply` on this machine. The schema is in [doc/bridge.schema.json](doc/bridge.schema.json); the details, including what counts as widening, are in [doc/config.md](doc/config.md).
 
 ### Feishu / Lark
 
@@ -160,7 +163,7 @@ Both kinds get the MCP URL, so any agent with an MCP client can use `send_messag
 ```
 src/
   cli.ts                 commands
-  config/                schema (zod) + semantic checks
+  config/                schema (zod), checks with line numbers, tests, change review (what widens access)
   core/router.ts         first-match routing, explain, outbound grants
   core/policy.ts         approvals, max hops, budgets
   core/bridge.ts         inbound → queue → agent turn → reply; MCP tool backend

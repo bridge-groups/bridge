@@ -1,6 +1,7 @@
 /** Keeping credentials out of the audit trail. */
 
-const SECRET_PATTERNS: Array<[RegExp, string]> = [
+/** Credentials recognised by their own shape. */
+const TOKEN_PATTERNS: Array<[RegExp, string]> = [
   [/xox[abposr]-[A-Za-z0-9-]{10,}/g, '[redacted]'], // Slack tokens
   [/xapp-[A-Za-z0-9-]{10,}/g, '[redacted]'], // Slack app tokens
   [/\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g, '[redacted]'], // Telegram bot tokens
@@ -12,6 +13,10 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted]'], // JWTs
   [/\b[tua]-[A-Za-z0-9]{30,}\b/g, '[redacted]'], // Feishu / Lark tenant, user and app access tokens
   [/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/-]{16,}=*/gi, '$1 [redacted]'], // Authorization header schemes
+];
+
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  ...TOKEN_PATTERNS,
   // JSON fields that name a credential: "app_secret": "…", "access_token": "…", "password": "…"
   [/("[\w-]*(?:secret|token|password|passwd|api[_-]?key)[\w-]*"\s*:\s*")(?:[^"\\]|\\.){8,}"/gi, '$1[redacted]"'],
 ];
@@ -38,4 +43,9 @@ export function redact(s: string): string {
     if (escaped !== secret) out = out.split(escaped).join('[redacted]');
   }
   return SECRET_PATTERNS.reduce((acc, [re, to]) => acc.replace(re, to), out);
+}
+
+/** Whether a config value is itself a credential (a known token format), rather than a reference to one. */
+export function looksLikeSecret(value: string): boolean {
+  return TOKEN_PATTERNS.some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(value));
 }

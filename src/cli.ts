@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-import { existsSync, watch, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve, join, dirname, basename } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
-import { ConfigError, loadConfigFile } from './config/load.ts';
+import { checkConfig, ConfigError, formatIssue, loadConfigFile } from './config/load.ts';
+import { configChanges, describeChanges, type ConfigChange } from './config/changes.ts';
+import { AppliedConfig, ConfigGate, configSha } from './config/gate.ts';
+import { configJsonSchema } from './config/json-schema.ts';
 import type { BridgeConfig } from './config/schema.ts';
 import { Bridge } from './core/bridge.ts';
 import { Router } from './core/router.ts';
@@ -33,6 +36,9 @@ Usage: bridge <command> [options]
   init                     write a starter bridge.yaml
   up                       connect IMs and start routing
   chat --as <person>       talk to your routes from this terminal (routes from local:*)
+  check [--json] [--apply]  check bridge.yaml and show what it changes against the running config;
+                             --apply confirms changes that widen access (you are the owner here)
+  schema                   print the JSON Schema of bridge.yaml
   doctor                   check config, secrets, agents and tool servers
   routes explain           show which route a message would take
                              --from slack:#dev --sender alice [--text "..."] [--mention] [--dm]
@@ -69,6 +75,8 @@ async function main() {
       force: { type: 'boolean', default: false },
       'sign-out': { type: 'boolean', default: false },
       'older-than': { type: 'string', default: '7d' },
+      json: { type: 'boolean', default: false },
+      apply: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -92,6 +100,10 @@ async function main() {
     }
     case 'doctor':
       return doctor(configPath);
+    case 'check':
+      return check(configPath, { json: values.json!, apply: values.apply! });
+    case 'schema':
+      return void process.stdout.write(configJsonSchema());
     case 'routes': {
       if (sub !== 'explain') fail('usage: bridge routes explain --from <im:channel> --sender <person>');
       const cfg = load(configPath);
@@ -238,27 +250,35 @@ async function main() {
 }
 
 async function run(configPath: string, ims: (cfg: BridgeConfig) => ImAdapter[], opts: { quiet?: boolean } = {}) {
-  const cfg = load(configPath);
-  const store = openStore(cfg, configPath);
+  load(configPath); // exits with the file's problems listed
   const log = opts.quiet ? (l: string) => void (l.startsWith('inbound error') && console.error(l)) : (l: string) => console.log(l);
+  let bridge: Bridge | undefined;
+  // A change that widens access waits for an owner, also across restarts: the bridge starts with the config
+  // applied last until then.
+  const gate = new ConfigGate({
+    path: configPath,
+    applied: AppliedConfig.for(configPath),
+    apply: (next) => bridge?.reload(next),
+    log: (l) => console.log(l),
+    onPending: (pending, signal) => bridge?.askOwnersAboutConfig(pending, signal),
+  });
+  const cfg = gate.initial();
+  const store = openStore(cfg, configPath);
+  gate.onAudit((event) => store.trace('config', 'config', event.by ?? 'file', event));
   const filesDir = join(resolve(configPath, '..', cfg.server.data_dir), 'files');
-  const bridge = new Bridge({ cfg, store, ims: ims(cfg), filesDir, log });
+  bridge = new Bridge({ cfg, store, ims: ims(cfg), filesDir, log });
+  bridge.attachConfigGate(gate);
   const { mcpUrl } = await bridge.start();
   log(`bridge up — MCP hub ${mcpUrl}, ${Object.keys(cfg.agents).length} agents, ${cfg.routes.length} routes`);
   log(`dashboard: ${localBaseUrl(cfg.server)}/`);
+  gate.offer(); // a widening change made while the bridge was down asks now
 
   let timer: NodeJS.Timeout | undefined;
   // Watch the directory: editors that replace the file would orphan a file watcher.
   watch(dirname(configPath), (_event, file) => {
     if (file && file !== basename(configPath)) return;
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      try {
-        bridge.reload(loadConfigFile(configPath));
-      } catch (err) {
-        console.error(`config not reloaded: ${(err as Error).message}`);
-      }
-    }, 300);
+    timer = setTimeout(() => gate.offer(), 300);
   });
 
   const shutdown = async () => {
@@ -330,6 +350,62 @@ async function doctor(configPath: string) {
   }
   await hub.stop();
   process.exit(ok ? 0 : 1);
+}
+
+/**
+ * `bridge check`: every problem in the file with its line, then what it changes against the config the bridge
+ * applied last. With --apply, confirm the widening changes (in the running bridge, or for its next start).
+ */
+async function check(configPath: string, opts: { json: boolean; apply: boolean }) {
+  if (!existsSync(configPath)) fail(`no config at ${configPath} — run "bridge init"`);
+  const text = readFileSync(configPath, 'utf8');
+  const sha = configSha(text);
+  const { config, issues } = checkConfig(text);
+  const applied = AppliedConfig.for(configPath);
+  const appliedText = applied.read();
+  const running = appliedText === undefined ? undefined : checkConfig(appliedText).config;
+  const changes: ConfigChange[] = config && running ? configChanges(running, config) : [];
+  const needsConfirmation = changes.some((c) => c.widens);
+  const file = basename(configPath);
+
+  if (opts.json && !opts.apply) {
+    console.log(JSON.stringify({ ok: !!config, sha, issues, changes, needsConfirmation, firstApply: !running }, null, 2));
+    process.exit(config ? 0 : 1);
+  }
+  if (!config) {
+    for (const i of issues) console.log(`${file}:${i.line ?? 1}: ${formatIssue({ ...i, line: undefined })}`);
+    fail(`${issues.length} problem${issues.length > 1 ? 's' : ''}; nothing applies until they are fixed`);
+  }
+  if (!opts.apply) {
+    console.log(`${file} is valid (${sha}${config.tests.length ? `, ${config.tests.length} tests pass` : ''})`);
+    if (!running) console.log('nothing applied yet: the bridge starts with this file as it is');
+    else if (!changes.length) console.log('no changes against the running config');
+    else {
+      for (const line of describeChanges(changes)) console.log(`  ${line}`);
+      console.log(
+        needsConfirmation
+          ? '"+" changes widen access: they wait for an owner — "bridge check --apply" here, the dashboard, or the IM buttons'
+          : 'nothing widens access: the running bridge applies it on its own',
+      );
+    }
+    return;
+  }
+
+  // --apply: whoever runs it on this machine stands in for the owner.
+  const base = localBaseUrl(config.server);
+  if (await reachable(base)) {
+    const res = await fetch(`${base}/api/config/apply`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sha, via: 'cli' }),
+    });
+    const body = (await res.json()) as { error?: string; changes?: ConfigChange[] };
+    if (!res.ok) fail(`not applied: ${body.error ?? res.statusText}`);
+    console.log(`applied ${sha} in the running bridge (${body.changes?.length ?? 0} changes)`);
+  } else {
+    applied.write(text);
+    console.log(`confirmed ${sha}: the bridge is not running and starts with it next time`);
+  }
 }
 
 function load(path: string, exitOnError = true): BridgeConfig {

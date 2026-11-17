@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { sessionSlug } from '../adapters/agent/worktree.ts';
 import type { Store } from './store.ts';
+import { describeChanges } from '../config/changes.ts';
+import type { ConfigGate, PendingConfig } from '../config/gate.ts';
 
 interface ThreadRef {
   platform: string;
@@ -85,6 +87,9 @@ const COMMANDS = new Map<string, 'status' | 'merge' | 'discard' | 'pr'>([
   ['discard', 'discard'], ['丢弃', 'discard'], ['放弃', 'discard'],
 ]);
 
+/** How long the IM buttons for a pending config change stay open (the change itself waits until decided). */
+const CONFIG_ASK_MS = 24 * 3600_000;
+
 /** ask_human waits between 1 minute and 1 day, whatever the agent asks for. */
 const ASK_MINUTES = { default: 30, min: 1, max: 24 * 60 };
 
@@ -123,8 +128,18 @@ export class Bridge implements HubBackend, WebBackend {
   /** Open button choices by id: who may click, and how to settle them. */
   private readonly choices = new Map<
     string,
-    { allowed: Set<string>; settle: (r: { by: string; value: string }) => void; key: string; text: string; options: Choice[]; at: number }
+    {
+      allowed: Set<string>;
+      settle: (r: { by: string; value: string }) => void;
+      key: string;
+      text: string;
+      options: Choice[];
+      at: number;
+      /** Shown on the dashboard's list of choices (config changes have a section of their own). */
+      listed: boolean;
+    }
   >();
+  private configGate?: ConfigGate;
   /** Dashboard branch status per session key (see BRANCH_CACHE_MS). */
   private readonly branchCache = new Map<string, { at: number; branch?: string; canMerge: boolean }>();
   readonly oauth: OAuthFlows;
@@ -948,7 +963,7 @@ export class Bridge implements HubBackend, WebBackend {
   }
 
   webChoices(): WebChoice[] {
-    return [...this.choices.entries()].map(([id, c]) => ({
+    return [...this.choices.entries()].filter(([, c]) => c.listed).map(([id, c]) => ({
       id,
       key: c.key,
       text: c.text,
@@ -956,6 +971,84 @@ export class Bridge implements HubBackend, WebBackend {
       allowed: [...c.allowed],
       createdAt: c.at,
     }));
+  }
+
+  webConfig(): { pending: PendingConfig | null } {
+    return { pending: this.configGate?.pending() ?? null };
+  }
+
+  /** Apply or reject the config file with this sha as the owner (dashboard or `bridge check --apply`). */
+  webConfigDecide(sha: string, action: 'apply' | 'reject', via: 'web' | 'cli') {
+    if (!this.configGate) throw new Error('this bridge does not watch a config file');
+    const who = `${this.webPerson()} (${via})`;
+    if (action === 'reject') {
+      this.configGate.reject(sha, who);
+      return { changes: [] };
+    }
+    return { changes: this.configGate.confirm(sha, who) };
+  }
+
+  // ───────────────────────── config changes ─────────────────────────
+
+  /** Changes to bridge.yaml that widen access are applied by `gate` once an owner confirms them. */
+  attachConfigGate(gate: ConfigGate) {
+    this.configGate = gate;
+  }
+
+  /**
+   * Ask every owner, in their direct messages with the bot, to apply or reject a config change that widens
+   * access. Whichever answer comes first (here, on the dashboard or from the CLI) settles it everywhere.
+   */
+  askOwnersAboutConfig(pending: PendingConfig, signal: AbortSignal) {
+    const gate = this.configGate;
+    if (!gate) return;
+    const owners = Object.entries(this.cfg.people).filter(([, p]) => p.trust === 'owner');
+    const text = [
+      `⚙️ bridge.yaml changed in a way that widens access (${pending.sha}). Apply it?`,
+      ...describeChanges(pending.changes),
+      '("+" widens access, "-" narrows it, "~" neither)',
+    ].join('\n');
+    let asked = 0;
+    for (const [, person] of owners) {
+      for (const platform of this.ims.keys()) {
+        const userId = (person as Record<string, unknown>)[platform];
+        if (typeof userId !== 'string') continue;
+        const key = `${platform}:dm:${userId}`;
+        const dm = this.store.getSession(key);
+        if (!dm) continue;
+        asked++;
+        this.choose({
+          key,
+          thread: { platform, channelId: dm.channel_id, threadId: dm.thread_id, isDM: true },
+          text,
+          choices: [
+            { label: 'Apply', value: 'apply', style: 'primary' },
+            { label: 'Reject', value: 'reject', style: 'danger' },
+          ],
+          allowed: owners.map(([id]) => id),
+          timeoutMs: CONFIG_ASK_MS,
+          typedHint: 'Reply "apply" or "reject".',
+          typed: (t) => (/^apply$/i.test(t) ? 'apply' : /^reject$/i.test(t) ? 'reject' : undefined),
+          // Decided here: apply or reject now, so the message shows what really happened.
+          outcome: (r) => {
+            if (!r) return '⌛ No answer — the change still waits: bridge check --apply, or the dashboard.';
+            try {
+              if (r.value === 'reject') {
+                gate.reject(pending.sha, r.by);
+                return `✖ Rejected by ${r.by}; the running config stays.`;
+              }
+              gate.confirm(pending.sha, r.by);
+              return `✅ Applied by ${r.by}.`;
+            } catch (err) {
+              return `⚠️ Not applied: ${(err as Error).message}`;
+            }
+          },
+          signal,
+          unlisted: true,
+        }).catch((err) => this.log(`config confirmation not sent to ${key}: ${(err as Error).message}`));
+      }
+    }
+    if (!asked) this.log('no owner has a direct message with the bot yet: confirm with "bridge check --apply" or the dashboard');
   }
 
   /** The dashboard is this machine's owner: the first person with trust owner. */
@@ -1077,8 +1170,10 @@ _(from the dashboard, by ${who})_`).catch(() => {});
     typedHint: string;
     typed: (text: string) => string | undefined;
     outcome: (r: { by: string; value: string } | undefined) => string;
-    /** Aborting it cancels the choice (the turn that asked has ended). */
+    /** Aborting it cancels the choice: the turn that asked has ended, or an Error reason says why. */
     signal?: AbortSignal;
+    /** Leave it off the dashboard's list of choices. */
+    unlisted?: boolean;
   }): Promise<{ by: string; value: string } | undefined> {
     const im = this.ims.get(opts.thread.platform);
     const id = randomUUID().slice(0, 8);
@@ -1110,10 +1205,13 @@ _(from the dashboard, by ${who})_`).catch(() => {});
         settle(undefined);
       },
     };
-    const onAbort = () => waiter.cancel('the turn has ended');
+    const onAbort = () => {
+      const reason = opts.signal?.reason;
+      waiter.cancel(reason instanceof Error && reason.name !== 'AbortError' ? reason.message : 'the turn has ended');
+    };
     const timer = setTimeout(() => settle(undefined), opts.timeoutMs);
     // Registered before the prompt goes out, so even an instant click or reply counts.
-    this.choices.set(id, { allowed, settle, key: opts.key, text: opts.text, options: opts.choices, at: Date.now() });
+    this.choices.set(id, { allowed, settle, key: opts.key, text: opts.text, options: opts.choices, at: Date.now(), listed: !opts.unlisted });
     this.addWaiter(opts.key, waiter);
     if (opts.signal?.aborted) onAbort();
     else opts.signal?.addEventListener('abort', onAbort, { once: true });

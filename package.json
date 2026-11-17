@@ -9,7 +9,9 @@
   },
   "files": [
     "out",
-    "src/examples"
+    "src/examples",
+    "doc/bridge.schema.json",
+    "doc/config.md"
   ],
   "engines": {
     "node": ">=24"

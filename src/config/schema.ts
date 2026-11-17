@@ -218,6 +218,34 @@ const Defaults = z
     retention: '30d',
   });
 
+/**
+ * Assertions about the routing this file sets up, checked whenever it is loaded: a file whose tests fail is not
+ * applied. An inbound test sends a message from an IM address; an outbound test asks whether an agent may call a
+ * tool ("server.tool") or delegate to another agent.
+ */
+const InboundTest = z
+  .object({
+    /** IM address the message comes from: "slack:#dev", "feishu:dm", "slack:C0123". */
+    from: z.string().regex(/^[a-z]+:.+$/, 'expected an IM address such as slack:#dev or slack:dm'),
+    /** A person id from people, or a platform user id; leave out for someone unknown. */
+    sender: z.string().optional(),
+    mention: z.boolean().default(false),
+    text: z.string().default('hello'),
+    /** The agent that should get the message, or "none". */
+    expect: z.string(),
+  })
+  .strict();
+const OutboundTest = z
+  .object({
+    agent: z.string(),
+    /** "server.tool" or another agent's name. */
+    calls: z.string(),
+    expect: z.enum(['allow', 'deny']),
+  })
+  .strict();
+export const RouteTest = z.union([InboundTest, OutboundTest]);
+export type RouteTest = z.infer<typeof RouteTest>;
+
 const Server = z
   .object({
     host: z.string().default('127.0.0.1'),
@@ -238,6 +266,7 @@ export const BridgeConfig = z
     routes: z.array(Route).default([]),
     policies: z.array(Policy).default([]),
     defaults: Defaults,
+    tests: z.array(RouteTest).default([]),
   })
   .strict();
 export type BridgeConfig = z.infer<typeof BridgeConfig>;
