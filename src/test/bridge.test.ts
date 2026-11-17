@@ -269,7 +269,9 @@ test('approval buttons: wrong person is told privately, right person approves, m
 
 test('budget: each turn gets what is left, and an exhausted budget stops the turn', async () => {
   const seen: (number | undefined)[] = [];
-  const cc: AgentAdapter = { name: 'echo', async run(t) { seen.push(t.budgetUsd); return { text: 'ok', costUsd: 0.6 }; } };
+  // The second turn overshoots what it was given, as an agent that checks its cap between requests can.
+  const costs = [0.5, 0.7];
+  const cc: AgentAdapter = { name: 'echo', async run(t) { seen.push(t.budgetUsd); return { text: 'ok', costUsd: costs[seen.length - 1] }; } };
   const im = new FakeIm();
   const bridge = new Bridge({
     cfg: parseConfig(yaml('', '  - { match: { agent: echo }, budget_usd: 1 }')),
@@ -282,9 +284,39 @@ test('budget: each turn gets what is left, and an exhausted budget stops the tur
       await bridge.idle();
     }
     assert.equal(seen[0], 1);
-    assert.ok(Math.abs(seen[1]! - 0.4) < 1e-9);
+    assert.ok(Math.abs(seen[1]! - 0.5) < 1e-9);
     assert.equal(seen.length, 2, 'third turn never reaches the agent');
-    assert.match(im.transcript().join('\n'), /used its \$1 budget/);
+    assert.match(im.transcript().join('\n'), /used the \$1 budget/);
+  } finally {
+    await bridge.stop();
+  }
+});
+
+test('budget: a turn waits for enough budget to cover the cheapest recent turn, and refusals are audited', async () => {
+  const seen: (number | undefined)[] = [];
+  const cc: AgentAdapter = { name: 'echo', async run(t) { seen.push(t.budgetUsd); return { text: 'ok', costUsd: 0.25 }; } };
+  const im = new FakeIm();
+  const store = new Store(':memory:');
+  const bridge = new Bridge({
+    cfg: parseConfig(yaml('', '  - { match: { agent: echo }, budget_usd: 0.6 }')),
+    store, ims: [im], agents: new Map([['echo', cc]]), log: () => {},
+  });
+  await bridge.start();
+  try {
+    for (const t of ['one', 'two', 'three']) {
+      im.receive({ userId: 'U1', text: t });
+      await bridge.idle();
+    }
+    assert.equal(seen.length, 2, '$0.10 left is less than the $0.25 a turn costs');
+    assert.match(im.transcript().join('\n'), /echo needs more than the \$0\.10 left of this conversation's \$0\.6 budget \(its cheapest recent turn cost \$0\.25\)/);
+    const refused = store.readTrace().filter((r) => r.kind === 'budget');
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0]!.actor, 'echo');
+    const detail = JSON.parse(refused[0]!.detail);
+    assert.equal(detail.budgetUsd, 0.6);
+    assert.equal(detail.cheapestTurnUsd, 0.25);
+    assert.ok(Math.abs(detail.leftUsd - 0.1) < 1e-9);
+    assert.equal(store.readTrace().filter((r) => r.kind === 'error').length, 0, 'a refusal is not an error');
   } finally {
     await bridge.stop();
   }

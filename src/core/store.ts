@@ -159,6 +159,22 @@ export class Store {
       .run(Date.now(), sessionKey, kind, actor, redact(JSON.stringify(detail ?? null)));
   }
 
+  /**
+   * The cheapest of the agent's last `recent` turns that reported a cost (from the audit trail). A turn's
+   * fixed overhead (system prompt, tool list, first model request) makes this a floor for what its next turn costs.
+   */
+  cheapestRecentTurn(agent: string, recent = 20): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MIN(cost) AS cost FROM (
+           SELECT json_extract(detail, '$.costUsd') AS cost FROM trace
+           WHERE kind = 'reply' AND actor = ? AND json_extract(detail, '$.costUsd') > 0
+           ORDER BY id DESC LIMIT ?)`,
+      )
+      .get(agent, recent) as { cost: number | null } | undefined;
+    return row?.cost ?? undefined;
+  }
+
   readTrace(opts: { sessionKey?: string; limit?: number } = {}): TraceRow[] {
     const limit = opts.limit ?? 100;
     const rows = opts.sessionKey

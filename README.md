@@ -61,7 +61,7 @@ node out/cli.js routes explain --from slack:#dev --sender alice --mention
 node out/cli.js up
 ```
 
-Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `deny` / `yes` also work). A `budget_usd` policy is a per-conversation cap: each turn is started with only what is left (Claude Code gets it as `--max-budget-usd`).
+Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `deny` / `yes` also work). A `budget_usd` policy is a per-conversation cap: each turn is started with only what is left (Claude Code gets it as `--max-budget-usd`). Agents check their cap between model requests, so a turn can end up to one request over it; to keep that from happening, a turn starts only when what is left covers the agent's cheapest recent turn. A refused turn is answered in the chat and recorded in the audit trail as `budget`.
 
 `bridge.yaml` is hot-reloaded. An agent whose settings changed gets a new process for its next turn; turns already running finish on the old one. Changing IM credentials needs a restart.
 

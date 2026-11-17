@@ -74,7 +74,7 @@ button:disabled { opacity: .5; cursor: default; }
 .ev .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
 .ev.inbound .kind { color: var(--accent); }
 .ev.reply .kind { color: var(--ok); }
-.ev.error .kind, .ev.approval .kind { color: var(--danger); }
+.ev.error .kind, .ev.approval .kind, .ev.budget .kind { color: var(--danger); }
 .ev.tool_call .kind, .ev.tool_result .kind { color: var(--warn); }
 .ev details summary { cursor: pointer; color: var(--muted); }
 .ev pre { margin: 4px 0 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -286,6 +286,7 @@ button:disabled { opacity: .5; cursor: default; }
       if (kind === 'choice') return { text: d.outcome };
       if (kind === 'ignored') return { text: d.text, note: 'no route' };
       if (kind === 'command') return { text: d.command };
+      if (kind === 'budget') return { text: 'turn not started: ' + money(d.leftUsd) + ' of ' + money(d.budgetUsd) + ' left' + (d.cheapestTurnUsd != null ? ', cheapest recent turn ' + money(d.cheapestTurnUsd) : '') };
       if (kind === 'error') return { text: d.message || d.error || detail };
     }
     return { text: '', raw: JSON.stringify(d, null, 2) };

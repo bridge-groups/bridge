@@ -424,13 +424,6 @@ export class Bridge implements HubBackend, WebBackend {
       initiator: job.envelope.initiator,
     });
 
-    const budget = job.envelope.budgetUsd;
-    if (budget !== undefined && session.spent_usd >= budget) {
-      this.store.finish(job.envelope.id, 'failed');
-      await this.notify(thread, `💸 ${agent} has used its $${budget} budget for this conversation. Send "reset" to start over.`);
-      return;
-    }
-
     const progress = this.cfg.defaults.progress;
     const im = this.ims.get(thread.platform);
     const edit = im?.edit?.bind(im);
@@ -482,7 +475,8 @@ export class Bridge implements HubBackend, WebBackend {
       const reply = await this.invoke(ctx, text, session.agent_session_id ?? undefined, { onProgress });
       outcome = { ok: true, text: reply.text || '(no reply)' };
     } catch (err) {
-      outcome = { ok: false, message: (err as Error)?.message ?? String(err) };
+      // A refused turn is an answer, not a failure: it is already in the audit trail as `budget`.
+      outcome = err instanceof BudgetRefusal ? { ok: true, text: `💸 ${err.message}` } : { ok: false, message: (err as Error)?.message ?? String(err) };
     } finally {
       finished = true;
       clearTimeout(pending);
@@ -513,8 +507,10 @@ export class Bridge implements HubBackend, WebBackend {
     const adapter = this.agent(turn.agent);
     const ctx: TurnCtx = { ...turn, controller: new AbortController() };
     const budgetUsd = this.remainingBudget(ctx);
-    if (budgetUsd !== undefined && budgetUsd <= 0) {
-      throw new Error(`the $${ctx.envelope.budgetUsd} budget for this conversation is used up — send "reset" to start over`);
+    const refusal = this.budgetRefusal(ctx, budgetUsd);
+    if (refusal) {
+      this.store.trace(ctx.sessionKey, 'budget', ctx.agent, refusal.detail);
+      throw refusal;
     }
     if (opts.parent?.aborted) throw new Error('the delegating turn has ended');
     const endWithParent = () => ctx.controller.abort();
@@ -651,6 +647,31 @@ export class Bridge implements HubBackend, WebBackend {
     if (ctx.envelope.budgetUsd === undefined) return undefined;
     const spent = this.store.getSession(ctx.rootKey)?.spent_usd ?? 0;
     return Math.max(0, ctx.envelope.budgetUsd - spent);
+  }
+
+  /**
+   * Whether a turn may start with what is left of the conversation budget. An agent's spending cap is only
+   * checked between model requests, so a turn started with less than one request costs overshoots the budget;
+   * a turn starts only when at least the agent's cheapest recent turn is left.
+   */
+  private budgetRefusal(ctx: TurnCtx, left: number | undefined): BudgetRefusal | undefined {
+    const budget = ctx.envelope.budgetUsd;
+    if (budget === undefined || left === undefined) return undefined;
+    const reset = 'Send "reset" to start a new conversation with a fresh budget.';
+    if (left <= 0) {
+      return new BudgetRefusal(`${ctx.agent} has used the $${budget} budget of this conversation. ${reset}`, {
+        budgetUsd: budget,
+        leftUsd: 0,
+      });
+    }
+    const floor = this.store.cheapestRecentTurn(ctx.agent);
+    if (floor !== undefined && left < floor) {
+      return new BudgetRefusal(
+        `${ctx.agent} needs more than the $${left.toFixed(2)} left of this conversation's $${budget} budget (its cheapest recent turn cost $${floor.toFixed(2)}). ${reset}`,
+        { budgetUsd: budget, leftUsd: left, cheapestTurnUsd: floor },
+      );
+    }
+    return undefined;
   }
 
   // ───────────────────────── MCP backend ─────────────────────────
@@ -1287,4 +1308,13 @@ export function split(text: string, max: number): string[] {
     out.push(chunk);
   }
   return out;
+}
+
+/** A turn not started because the conversation budget can't cover it; `detail` goes to the audit trail. */
+class BudgetRefusal extends Error {
+  readonly detail: Record<string, number>;
+  constructor(message: string, detail: Record<string, number>) {
+    super(message);
+    this.detail = detail;
+  }
 }
