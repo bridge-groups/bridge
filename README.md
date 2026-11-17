@@ -89,7 +89,7 @@ node out/cli.js service status
 node out/cli.js service uninstall
 ```
 
-Logs go to `~/Library/Logs/bridge/bridge.log` (launchd can't write into `~/Documents`). The service starts with a bare environment, so `install` refuses a config that uses `env:` references or names secrets missing from the keychain. A turn cut off by a restart resumes in the same agent session (at most twice), and anything queued while the bridge was down runs when it comes back, within `offline_queue_ttl`.
+Logs go to `~/Library/Logs/bridge/bridge.log` (launchd can't write into `~/Documents`). The service starts with a bare environment, so `install` refuses a config that uses `env:` references or names secrets missing from the keychain. When the bridge shuts down or a Claude Code turn is stopped, the agent processes and the commands they run get SIGTERM and, 5 seconds later, SIGKILL (a process an agent deliberately detached, such as `nohup … &`, is not tracked). A turn cut off by a restart resumes in the same agent session (at most twice), and anything queued while the bridge was down runs when it comes back, within `offline_queue_ttl`.
 
 ### Parallel conversations on one repo
 

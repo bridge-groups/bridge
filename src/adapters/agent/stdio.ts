@@ -5,6 +5,7 @@ import type { AgentConfig } from '../../config/schema.ts';
 import { parseDuration } from '../../core/address.ts';
 import { resolveSecret } from '../../secrets.ts';
 import type { AgentAdapter, AgentReply, AgentTurn } from './types.ts';
+import { terminateTree } from './process-tree.ts';
 
 type StdioConfig = Extract<AgentConfig, { type: 'stdio' }>;
 
@@ -28,6 +29,8 @@ export class StdioAgent implements AgentAdapter {
   readonly name: string;
   private readonly cfg: StdioConfig;
   private child?: ChildProcessWithoutNullStreams;
+  /** Resolves when the process has exited. */
+  private readonly exited = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
   private readonly pending = new Map<string, Pending>();
 
   constructor(name: string, cfg: StdioConfig) {
@@ -76,9 +79,17 @@ export class StdioAgent implements AgentAdapter {
     });
   }
 
+  /** End the agent process and what it started: SIGTERM, then SIGKILL after the grace period. */
   async stop() {
-    this.child?.kill();
+    const child = this.child;
     this.child = undefined;
+    if (child) await this.terminate(child);
+  }
+
+  private async terminate(child: ChildProcessWithoutNullStreams) {
+    const exited = this.exited.get(child);
+    if (child.pid === undefined || !exited) return;
+    await terminateTree(child.pid, exited);
   }
 
   private write(child: ChildProcessWithoutNullStreams, msg: object) {
@@ -95,7 +106,9 @@ export class StdioAgent implements AgentAdapter {
     if (this.child && this.child.exitCode === null && this.child.stdin.writable) return this.child;
     const env: Record<string, string> = { ...(process.env as Record<string, string>) };
     for (const [k, v] of Object.entries(this.cfg.env)) env[k] = resolveSecret(v);
-    const child = spawn(this.cfg.command, this.cfg.args, { cwd: this.cfg.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    // Its own process group, so stopping it reaches what it started.
+    const child = spawn(this.cfg.command, this.cfg.args, { cwd: this.cfg.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+    this.exited.set(child, new Promise((resolve) => child.once('close', () => resolve())));
     child.stderr.on('data', (d) => process.stderr.write(`[${this.name}] ${d}`));
     createInterface({ input: child.stdout }).on('line', (line) => this.onLine(line));
     child.on('exit', (code) => this.failAll(child, new Error(`${this.name} exited (code ${code})`)));
@@ -103,7 +116,7 @@ export class StdioAgent implements AgentAdapter {
     // EPIPE: the agent closed its stdin. Without this listener the error would crash the bridge.
     child.stdin.on('error', (err) => {
       this.failAll(child, new Error(`${this.name} stopped reading its input (${err.message})`));
-      child.kill();
+      void this.terminate(child);
     });
     this.child = child;
     return child;

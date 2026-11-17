@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeCodeAgent } from '../adapters/agent/claude-code.ts';
+import { KILL_GRACE_MS } from '../adapters/agent/process-tree.ts';
 import { StdioAgent } from '../adapters/agent/stdio.ts';
 import type { AgentTurn } from '../adapters/agent/types.ts';
 import { newEnvelope } from '../core/envelope.ts';
@@ -115,6 +116,28 @@ wait
   ac.abort();
   assert.match(await aborted, /abort/i);
   await until(() => !alive(tool2), 'the aborted tool subprocess to be killed');
+});
+
+test('claude-code: a stuck process is killed after the grace period, with the commands it runs in groups of their own', async () => {
+  const bin = tmp('ab-cc-');
+  const pidFile = join(bin, 'pid');
+  // Like Claude Code: the command runs in a process group of its own (job control). Both ignore SIGTERM.
+  const fake = script(bin, 'claude', `#!/bin/bash
+trap '' TERM
+set -m
+bash -c 'trap "" TERM; echo $$ > "${pidFile}.tmp" && mv "${pidFile}.tmp" "${pidFile}"; while :; do sleep 1; done' &
+cat > /dev/null
+wait
+`);
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }));
+  const outcome = agent.run(turn('work')).then(() => 'resolved', (e: Error) => e.message);
+  await until(() => existsSync(pidFile), 'the fake claude to start its command');
+  const command = Number(readFileSync(pidFile, 'utf8'));
+  const started = Date.now();
+  await agent.stop();
+  assert.ok(Date.now() - started >= KILL_GRACE_MS - 100, 'SIGTERM alone does not end it');
+  assert.match(await outcome, /claude exited/);
+  assert.equal(alive(command), false, 'the command in its own process group is killed too');
 });
 
 // ───────────────────────── stdio ─────────────────────────

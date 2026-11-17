@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { AgentConfig } from '../../config/schema.ts';
 import type { AgentAdapter, AgentReply, AgentTurn, Workspace } from './types.ts';
+import { terminateTree } from './process-tree.ts';
 import { resolveSecret } from '../../secrets.ts';
 import {
   ensureWorktree,
@@ -29,9 +30,6 @@ const BRIDGE_PROMPT = `You are being reached through bridge. Messages come from 
 - Use the "bridge" MCP tools to post an interim update (send_message), ask the person a question and wait for the reply (ask_human), hand work to another agent (delegate), or call the external tools you were granted.
 - Keep chat replies short and readable; the conversation is a chat thread, not a terminal.
 - Reply in the language of the person's own message, even when bridge notes like this one, attached files, screenshots or tool output are in another language. If their message has no words, use the language of their earlier messages.`;
-
-/** How long a stopped Claude Code (and the tools it started) gets after SIGTERM before SIGKILL. */
-const KILL_GRACE_MS = 5000;
 
 /**
  * Claude keeps its sessions per directory, so the session id the bridge stores also names the
@@ -157,7 +155,7 @@ export class ClaudeCodeAgent implements AgentAdapter {
     const signal = turn.signal;
     if (signal?.aborted) return Promise.reject(abortError(signal));
     return new Promise<AgentReply>((resolve, reject) => {
-      // Its own process group, so stopping it also stops the tools it started.
+      // Its own process group and session; stopping it also stops the commands it started (see terminateTree).
       const child = spawn(this.cfg.command, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       let markClosed!: () => void;
       const closed = new Promise<void>((r) => (markClosed = r));
@@ -221,26 +219,15 @@ export class ClaudeCodeAgent implements AgentAdapter {
     });
   }
 
-  /** SIGTERM the process group, SIGKILL it if still there after the grace period; resolves once closed. */
+  /** SIGTERM Claude Code and the commands it runs, SIGKILL what is left after the grace period; resolves once closed. */
   private async terminate(child: ChildProcess, closed: Promise<void>) {
-    signalGroup(child, 'SIGTERM');
-    const timer = setTimeout(() => signalGroup(child, 'SIGKILL'), KILL_GRACE_MS);
-    await closed;
-    clearTimeout(timer);
+    if (child.pid === undefined) return closed;
+    await terminateTree(child.pid, closed);
   }
 
   /** Bridge shutdown: end running turns (and their tools) so they can't keep editing while a resumed turn starts. */
   async stop() {
     await Promise.all([...this.running].map(([child, closed]) => this.terminate(child, closed)));
-  }
-}
-
-function signalGroup(child: ChildProcess, signal: NodeJS.Signals) {
-  if (child.pid === undefined) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    /* the group is gone */
   }
 }
 
