@@ -48,5 +48,8 @@
     "@tsconfig/node24": "24.0.6",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "protobufjs": false
   }
 }
