@@ -12,7 +12,7 @@ const domain = () => `gui/${process.getuid!()}`;
 export function installService(opts: { configPath: string; logFile: string }) {
   assertMac();
   const cli = join(dirname(fileURLToPath(import.meta.url)), 'cli.js');
-  if (!existsSync(cli)) throw new Error(`${cli} not found — run "npm run build" first`);
+  if (!existsSync(cli)) throw new Error(`${cli} not found — run "npm run output" first`);
   mkdirSync(dirname(PLIST), { recursive: true });
   mkdirSync(dirname(opts.logFile), { recursive: true });
   writeFileSync(

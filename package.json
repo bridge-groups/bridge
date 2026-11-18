@@ -1,8 +1,21 @@
 {
   "name": "@bridge-groups/bridge",
+  "type": "module",
+  "license": "MIT",
   "version": "0.1.0",
   "description": "Connect agents to IM, to other agents, and to tools: a library to embed in an app or service, and a CLI for your own machine.",
-  "type": "module",
+  "bin": {
+    "bridge": "out/cli.js"
+  },
+  "files": [
+    "out",
+    "src/examples",
+    "doc/config.md",
+    "doc/bridge.schema.json"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "exports": {
     ".": {
       "types": "./out/index.d.ts",
@@ -14,24 +27,12 @@
     },
     "./package.json": "./package.json"
   },
-  "license": "MIT",
-  "bin": {
-    "bridge": "out/cli.js"
-  },
-  "files": [
-    "out",
-    "src/examples",
-    "doc/bridge.schema.json",
-    "doc/config.md"
-  ],
-  "engines": {
-    "node": ">=24"
-  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "dev": "node src/cli.ts",
-    "test": "node --test 'src/test/**/*.test.ts'",
-    "typecheck": "tsc -p tsconfig.json"
+    "launch": "node src/cli.ts",
+    "output": "tsc -p tsconfig.build.json",
+    "suites": "node --test 'src/test/**/*.test.ts'",
+    "typeck": "tsc -p tsconfig.json",
+    "verify": "npm run typeck && npm run suites"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.76.0",

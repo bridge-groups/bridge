@@ -1,7 +1,3 @@
 node_modules/
 out/
-*.db
-*.db-*
-.bridge/
-bridge.yaml
 tmp/

@@ -109,15 +109,16 @@ What the project deliberately does not do is listed under "Not planned" in the R
 ## Commands
 
 ```bash
-npm run typecheck     # tsc over all of src/, tests included
-npm test              # node --test 'src/test/**/*.test.ts'
-npm run build         # compile to out/ (tests excluded)
-node src/cli.ts …     # run from source (Node ≥ 24 strips types natively)
+npm run typeck        # tsc over all of src/, tests included
+npm run suites        # node --test 'src/test/**/*.test.ts'
+npm run verify        # both, as CI runs them
+npm run output        # compile to out/ (tests excluded)
+npm run launch -- …   # the CLI from source (Node ≥ 24 strips types natively)
 node out/cli.js …     # run the build
 ```
 
-Run typecheck and tests before every commit. The background service runs `out/cli.js`: after changing code it
-uses, `npm run build && node out/cli.js service restart`.
+Run `npm run verify` before every commit. The background service runs `out/cli.js`: after changing code it
+uses, `npm run output && node out/cli.js service restart`.
 
 ## TypeScript conventions
 

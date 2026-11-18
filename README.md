@@ -1,16 +1,16 @@
-# bridge
+# Bridge
 
-Connects **agents ↔ IM**, **agents ↔ agents** and **agents ↔ tools**. Chat messages from Slack, Feishu / Lark or
+Connects **Agents ↔ IM**, **Agents ↔ Agents** and **Agents ↔ Tools**. Chat messages from Slack, Feishu / Lark or
 Telegram reach agents such as Claude Code or Codex; each agent turn can post updates, ask a person, hand work to
 another agent and call the tool servers its routes allow; policies decide approvals and budgets; everything lands
 in an audit trail with secrets redacted.
 
 - **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound, so you need no public URL.
   Telegram (long polling) is written but not yet tested against the real service.
-- **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON
-  lines ([doc/agents.md](doc/agents.md)).
 - **Tools**: MCP servers, local or remote. The bridge holds the credentials and gives each agent only what its
   routes allow.
+- **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON
+  lines ([doc/agents.md](doc/agents.md)).
 - **Deny by default**: a message reaches an agent only through a route, and every message, tool call and approval
   is recorded.
 
@@ -23,7 +23,7 @@ keychain, a local dashboard. To embed the bridge in an app or service instead, u
 Needs Node 24 or later.
 
 ```bash
-npm install && npm run build && npm link   # puts `bridge` on your PATH
+npm install && npm run output && npm link  # puts `bridge` on your PATH
 bridge init              # writes ~/.config/bridge/bridge.yaml with a local echo agent
 bridge check             # problems with line numbers, the file's tests, what an edit changes
 bridge chat --as me      # talk to your routes from the terminal
@@ -160,7 +160,7 @@ never reached the server, so a write never runs twice.
 
 ```bash
 bridge service install    # LaunchAgent: starts at login, restarted if it exits
-bridge service restart    # after rebuilding (npm run build)
+bridge service restart    # after rebuilding (npm run output)
 bridge service status
 bridge service uninstall
 ```
