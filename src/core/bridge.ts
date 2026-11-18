@@ -10,7 +10,7 @@ import { memoryStorage, OAuthFlows, watchTokens, type OAuthStorage } from '../mc
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import { dmKey, isDmKey, localBaseUrl, parseDuration, sessionSlug } from './address.ts';
 import { minTrust, newEnvelope, type ContentBlock, type Envelope } from './envelope.ts';
-import { PolicyEngine } from './policy.ts';
+import { PolicyEngine, type ApprovalRule } from './policy.ts';
 import { Router, type InboundFile, type InboundMessage } from './router.ts';
 import { existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1015,45 +1015,62 @@ export class Bridge implements HubBackend {
     if (!this.router.allowsOutbound(ctx.agent, qualified)) {
       return { text: `${ctx.agent} is not routed to ${qualified}`, isError: true };
     }
-    const rule = this.policies.approvalFor(ctx.agent, qualified, { readOnly: await this.tools.isReadOnly(server, tool) });
+    const rule = this.policies.approvalFor(ctx.agent, qualified, {
+      readOnly: await this.tools.isReadOnly(server, tool),
+      tainted: ctx.envelope.tainted,
+    });
     if (rule) {
-      const approvers = this.approvers(rule.approvers, ctx.envelope);
-      if (!approvers.length) {
-        this.trace(ctx.sessionKey, 'approval', 'nobody', { tool: qualified, approved: false });
-        return { text: `${qualified} needs an approval, but no configured person may give it (add a person with trust: owner)`, isError: true };
-      }
-      const expires = rule.timeoutMs < 60e3 ? `${Math.round(rule.timeoutMs / 1e3)}s` : `${Math.round(rule.timeoutMs / 60e3)}m`;
-      const header = `🔐 ${ctx.agent} wants to run \`${qualified}\` with:`;
-      const footer = `${approvers.join(', ')} can decide (expires in ${expires}).`;
-      const im = this.ims.get(ctx.thread.platform);
-      // Buttons go in one message, so long arguments are cut there; typed approvals are split like any reply.
-      const room = im?.sendChoice ? im.maxTextLength - header.length - footer.length - 120 : Infinity;
-      const decision = await this.choose({
-        key: ctx.rootKey,
-        thread: ctx.thread,
-        text: `${header}\n${codeBlock(JSON.stringify(args, null, 2), room)}\n${footer}`,
-        choices: [
-          { label: 'Approve', value: 'approve', style: 'primary' },
-          { label: 'Deny', value: 'deny', style: 'danger' },
-        ],
-        allowed: approvers,
-        timeoutMs: rule.timeoutMs,
-        typedHint: 'Reply "approve" or "deny".',
-        typed: (t) => (APPROVE.test(t) ? 'approve' : DENY.test(t) ? 'deny' : undefined),
-        outcome: (r) => (!r ? '⌛ Approval expired.' : r.value === 'approve' ? `✅ Approved by ${r.by}.` : `🚫 Denied by ${r.by}.`),
-        signal: ctx.controller.signal,
-      });
-      // An approval that lands after the turn ended must not run the tool for nobody.
-      if (ctx.controller.signal.aborted) return { text: 'this turn has ended', isError: true };
-      const approved = decision?.value === 'approve';
-      this.trace(ctx.sessionKey, 'approval', decision?.by ?? 'timeout', { tool: qualified, approved });
-      if (!approved) return { text: decision ? `denied by ${decision.by}` : 'approval timed out', isError: true };
+      const refusal = await this.approval(ctx, rule, { what: qualified, header: `run \`${qualified}\` with`, args, trace: { tool: qualified } });
+      if (refusal) return refusal;
     }
     const result = await this.tools.callTool(server, tool, args);
     const content = (result.content ?? []) as Array<{ type: string; text?: string }>;
     const text = content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('\n');
     this.trace(ctx.sessionKey, 'tool_result', qualified, { text, isError: result.isError });
     return { text, isError: Boolean(result.isError) };
+  }
+
+  /**
+   * Asks `rule`'s approvers in the conversation before the turn does something. Returns the error to hand the
+   * agent when nobody approved (or may approve), undefined when it may go ahead.
+   */
+  private async approval(
+    ctx: TurnCtx,
+    rule: ApprovalRule,
+    action: { what: string; header: string; args: Record<string, unknown>; trace: Record<string, unknown> },
+  ): Promise<ToolResult | undefined> {
+    const approvers = this.approvers(rule.approvers, ctx.envelope);
+    if (!approvers.length) {
+      this.trace(ctx.sessionKey, 'approval', 'nobody', { ...action.trace, approved: false });
+      return { text: `${action.what} needs an approval, but no configured person may give it (add a person with trust: owner)`, isError: true };
+    }
+    const expires = rule.timeoutMs < 60e3 ? `${Math.round(rule.timeoutMs / 1e3)}s` : `${Math.round(rule.timeoutMs / 60e3)}m`;
+    const header = `🔐 ${ctx.agent} wants to ${action.header}:`;
+    const footer = `${approvers.join(', ')} can decide (expires in ${expires}).`;
+    const im = this.ims.get(ctx.thread.platform);
+    // Buttons go in one message, so long arguments are cut there; typed approvals are split like any reply.
+    const room = im?.sendChoice ? im.maxTextLength - header.length - footer.length - 120 : Infinity;
+    const decision = await this.choose({
+      key: ctx.rootKey,
+      thread: ctx.thread,
+      text: `${header}\n${codeBlock(JSON.stringify(action.args, null, 2), room)}\n${footer}`,
+      choices: [
+        { label: 'Approve', value: 'approve', style: 'primary' },
+        { label: 'Deny', value: 'deny', style: 'danger' },
+      ],
+      allowed: approvers,
+      timeoutMs: rule.timeoutMs,
+      typedHint: 'Reply "approve" or "deny".',
+      typed: (t) => (APPROVE.test(t) ? 'approve' : DENY.test(t) ? 'deny' : undefined),
+      outcome: (r) => (!r ? '⌛ Approval expired.' : r.value === 'approve' ? `✅ Approved by ${r.by}.` : `🚫 Denied by ${r.by}.`),
+      signal: ctx.controller.signal,
+    });
+    // An approval that lands after the turn ended must not run anything for nobody.
+    if (ctx.controller.signal.aborted) return { text: 'this turn has ended', isError: true };
+    const approved = decision?.value === 'approve';
+    this.trace(ctx.sessionKey, 'approval', decision?.by ?? 'timeout', { ...action.trace, approved });
+    if (!approved) return { text: decision ? `denied by ${decision.by}` : 'approval timed out', isError: true };
+    return undefined;
   }
 
   /**
@@ -1092,6 +1109,12 @@ export class Bridge implements HubBackend {
     }
     this.delegating.add(childKey);
     try {
+      // A turn started by someone outside the trusted set hands work on only with an owner's approval.
+      const rule = this.policies.delegationApproval(ctx.envelope.tainted);
+      if (rule) {
+        const refusal = await this.approval(ctx, rule, { what: `delegating to ${target}`, header: `delegate to \`${target}\``, args: { task }, trace: { delegate: target } });
+        if (refusal) return refusal;
+      }
       await this.store.upsertSession({
         key: childKey,
         agent: target,

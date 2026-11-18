@@ -162,3 +162,15 @@ policies:
   assert.deepEqual(p.approvalFor('b', 'other.tool')?.approvers, ['initiator'], 'an agent-only policy covers all its tools');
   assert.equal(p.maxHops('a'), 2, 'an empty match applies to every agent');
 });
+
+test('policies: a tainted turn needs an approval for every write, even without a policy', () => {
+  const p = new PolicyEngine(cfg);
+  assert.equal(p.approvalFor('data-agent', 'other.write'), undefined, 'an untainted turn without a policy runs freely');
+  assert.deepEqual(p.approvalFor('data-agent', 'other.write', { tainted: true }), { approvers: ['initiator'], timeoutMs: 10 * 60e3 });
+  assert.equal(p.approvalFor('data-agent', 'other.read', { tainted: true, readOnly: true }), undefined, 'reads still run');
+  const merged = p.approvalFor('claude-code', 'github.push_files', { tainted: true });
+  assert.deepEqual(merged?.approvers, ['initiator', 'alice'], 'policy approvers stay, initiator is added once');
+  assert.equal(merged?.timeoutMs, 5 * 60e3, 'the policy timeout still wins');
+  assert.equal(p.delegationApproval(false), undefined);
+  assert.deepEqual(p.delegationApproval(true)?.approvers, ['initiator']);
+});

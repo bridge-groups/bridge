@@ -36,9 +36,10 @@ export class PolicyEngine {
 
   /**
    * Approval needed before `agent` runs `tool` (as "server.tool")? Approvers are merged across matching
-   * policies, the shortest timeout wins.
+   * policies, the shortest timeout wins. In a `tainted` turn every write needs one even without a policy:
+   * `initiator` is added, which the bridge resolves to the owners for such a turn.
    */
-  approvalFor(agent: string, tool: string, opts: { readOnly?: boolean } = {}): ApprovalRule | undefined {
+  approvalFor(agent: string, tool: string, opts: { readOnly?: boolean; tainted?: boolean } = {}): ApprovalRule | undefined {
     const hits = this.cfg.policies.filter(
       (p) =>
         p.approve_by?.length &&
@@ -46,10 +47,16 @@ export class PolicyEngine {
         (p.match.tool === undefined || anyGlob(p.match.tool, tool)) &&
         !(p.match.writes && opts.readOnly),
     );
-    if (!hits.length) return undefined;
-    const approvers = [...new Set(hits.flatMap((p) => p.approve_by ?? []))];
+    const guarded = opts.tainted === true && !opts.readOnly;
+    if (!hits.length && !guarded) return undefined;
+    const approvers = [...new Set([...hits.flatMap((p) => p.approve_by ?? []), ...(guarded ? ['initiator'] : [])])];
     const timeouts = hits.map((p) => parseDuration(p.timeout ?? APPROVAL_TIMEOUT));
-    return { approvers, timeoutMs: Math.min(...timeouts) };
+    return { approvers, timeoutMs: timeouts.length ? Math.min(...timeouts) : parseDuration(APPROVAL_TIMEOUT) };
+  }
+
+  /** Approval needed before a turn delegates? Only a `tainted` one, and the owners decide (via `initiator`). */
+  delegationApproval(tainted: boolean): ApprovalRule | undefined {
+    return tainted ? { approvers: ['initiator'], timeoutMs: parseDuration(APPROVAL_TIMEOUT) } : undefined;
   }
 
   private forAgent(agent: string): Policy[] {

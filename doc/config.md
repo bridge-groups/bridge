@@ -57,7 +57,9 @@ A message reaches an agent only through a route (deny by default).
 
 - An IM route (`from: slack:#dev`, `slack:dm`, `slack:*`) goes to exactly one agent. A route to an agent that runs
   on this machine (`claude-code`, `codex`, `stdio`) must name `when.sender`: a list of people, or `anyone` to opt
-  out on purpose.
+  out on purpose. With `anyone`, a stranger's message drives that agent's own tools (shell, file edits), which never
+  pass through the bridge; only its bridge tools and delegation wait for an owner (see Policies). Keep such an
+  agent on `permission_mode: plan` or `sandbox: read-only`.
 - `when.mention`: `true` (the default) needs the bot @-mentioned in a channel; a DM always counts as mentioned.
   `false` takes every message in the channel. `<agent>` needs the mention *and* the agent's name at the start
   (`@bot data-agent …`), so several agents can share a channel.
@@ -80,8 +82,11 @@ A message reaches an agent only through a route (deny by default).
   `max_hops` / `budget_usd` win.
 - `max_hops` and `budget_usd` belong to an agent, so they go on policies that match by `agent` only.
 - Approvers are people whose trust is not `external`. `initiator` means whoever started the conversation, but only
-  when that is such a person: for a message from someone outside `people:` (a `sender: anyone` route), the owners
-  decide instead, so nobody approves their own request.
+  when that is such a person: for a message from someone outside `people:` (a `sender: anyone` route) or with
+  trust `external`, the owners decide instead, so nobody approves their own request.
+- Such a message's turn, and every agent it delegates to, is stricter even without a policy: each tool call that
+  may write (not marked read-only) and each `delegate` waits for an owner (`timeout` 10m unless a matching policy
+  sets one). Matching policies still add their approvers. Read-only tools, `send_message` and `ask_human` run as usual.
 - `budget_usd` is per conversation; a conversation deleted by `retention` starts with a fresh budget.
 
 ## Rules a check enforces

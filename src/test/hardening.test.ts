@@ -265,6 +265,64 @@ test('an external initiator cannot approve their own tool call: the owner decide
   }
 });
 
+test('a stranger\'s turn: writes and delegation wait for an owner even without a policy; reads run', async () => {
+  const helper: AgentAdapter = { name: 'helper', async run(t) { return { text: `helper did ${t.text}` }; } };
+  const boss = scripted('boss', async (mcp) => {
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r: any = await mcp.callTool({ name, arguments: args });
+      return `${r.isError ? 'ERR ' : ''}${text(r)}`;
+    };
+    return [
+      await call('fake__echo', { text: 'hi' }),
+      await call('delegate', { agent: 'helper', task: 'sub' }),
+      await call('fake__echo', { text: 'again' }),
+    ].join(' | ');
+  });
+  // Policies only on fake.delete*, so neither echo nor delegate has one; the owner approves the delegation.
+  const { im, bridge } = await setup({ agents: [boss, helper] });
+  im.onSend((m) => {
+    if (m.text.startsWith('🔐')) queueMicrotask(() => im.receive({ userId: 'U1', text: 'approve', channelName: 'open', mentioned: false }));
+  });
+  try {
+    im.receive({ userId: 'U9', text: 'go', channelName: 'open' });
+    await bridge.idle();
+    const t = im.transcript().join('\n');
+    assert.equal(t.match(/🔐/g)?.length, 1, 'only the delegation asks: echo is read-only');
+    assert.match(t, /🔐 boss wants to delegate to `helper`/);
+    assert.match(t, /alice can decide/);
+    assert.match(t, /tool echo: hi \| helper did sub \| tool echo: again/);
+  } finally {
+    await bridge.stop();
+  }
+});
+
+test('a stranger\'s delegation the owner denies never runs; a member\'s delegation needs no approval', async () => {
+  const runs: string[] = [];
+  const helper: AgentAdapter = { name: 'helper', async run(t) { runs.push(t.text); return { text: `helper did ${t.text}` }; } };
+  const boss = scripted('boss', async (mcp) => {
+    const r: any = await mcp.callTool({ name: 'delegate', arguments: { agent: 'helper', task: 'sub' } });
+    return `${r.isError ? 'ERR ' : ''}${text(r)}`;
+  });
+  const { im, bridge } = await setup({ agents: [boss, helper] });
+  im.onSend((m) => {
+    if (m.text.startsWith('🔐')) queueMicrotask(() => im.receive({ userId: 'U1', text: 'deny', channelName: 'open', mentioned: false }));
+  });
+  try {
+    im.receive({ userId: 'U9', text: 'go', channelName: 'open' });
+    await bridge.idle();
+    assert.match(im.transcript().join('\n'), /ERR denied by alice/);
+    assert.deepEqual(runs, []);
+    im.receive({ userId: 'U2', text: 'go', channelName: 'boss' });
+    await bridge.idle();
+    const t = im.transcript().join('\n');
+    assert.equal(t.match(/🔐/g)?.length, 1, 'bob is in people: his delegation asks nobody');
+    assert.deepEqual(runs, ['sub']);
+    assert.match(t, /helper did sub/);
+  } finally {
+    await bridge.stop();
+  }
+});
+
 test('approval prompt: arguments in a code block they cannot break out of, cut to fit a button message', async () => {
   const im = new FakeIm().withButtons();
   const ids = ['a```b', 'x'.repeat(3000)];

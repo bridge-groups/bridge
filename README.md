@@ -192,7 +192,8 @@ tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` sho
 
 - Discord; Telegram tested against the real service
 - A2A
-- A stricter policy for messages from outside `people:` (today such a sender can't approve their own request)
+- A spending limit per sender outside `people:` (today the budget is per conversation, so a new thread starts a
+  fresh one)
 - A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP
   events, per-user isolation and limits, agents that run user code in sandboxes
 
