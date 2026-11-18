@@ -16,7 +16,7 @@ in an audit trail with secrets redacted.
 
 This README is about the `bridge` command, for your own machine: one process, one `bridge.yaml`, secrets in the OS
 keychain, a local dashboard. To embed the bridge in an app or service instead, use the library
-`@bridge-groups/bridge` ([doc/library.md](doc/library.md)).
+`@bridge-groups/bridge` ([doc/embeds.md](doc/embeds.md)).
 
 ## Quick start
 

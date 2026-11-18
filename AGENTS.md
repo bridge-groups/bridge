@@ -93,7 +93,7 @@ src/                     all source code
                          (local, opt-in); protocol.ts is the webhook / stdio wire format
   examples/              example agents (shipped)
   test/                  node:test suites, helpers and fixtures (not shipped)
-doc/                     documentation and reference files (bridge.schema.json is generated: `bridge schema`)
+doc/                     documentation and reference files (schema.json is generated: `bridge schema`)
 out/                     build output (git-ignored)
 tmp/                     scratch files, one-off scripts, handoffs (git-ignored)
 .agents/                 agent rules and skills (canons); CLAUDE.md and .claude/ link here

@@ -9,4 +9,4 @@ export function configJsonSchema(): string {
 }
 
 /** The copy shipped in doc/, which bridge.yaml files point their editors and agents at; resolves from src/ and out/. */
-export const SCHEMA_FILE = fileURLToPath(new URL('../../doc/bridge.schema.json', import.meta.url));
+export const SCHEMA_FILE = fileURLToPath(new URL('../../doc/schema.json', import.meta.url));

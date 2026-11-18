@@ -1,5 +1,5 @@
 ---
-name: bridge-config
+name: config
 description: Change a bridge.yaml (people, IM connections, agents, tool servers, routes, policies, tests) for the user. Use when the user asks to connect a channel or person to an agent, add an agent or MCP tool server, grant or restrict tools, add approvals or budgets, or otherwise change how bridge routes messages.
 ---
 
@@ -9,7 +9,7 @@ Outcome: `bridge.yaml` does what the user asked and nothing more, `bridge check`
 the behaviour the user relies on, and the user knows which changes wait for their confirmation.
 
 1. Read the user's `bridge.yaml` and [doc/config.md](../../../doc/config.md). The schema with every key and default
-   is `doc/bridge.schema.json`; `bridge schema` prints it.
+   is `doc/schema.json`; `bridge schema` prints it.
 2. Make the smallest edit that does what was asked. Keep comments and ordering, and follow the routing and policy
    rules in doc/config.md (a new route goes where it wins only for the messages it is meant for).
 3. Never write a credential into the file. If one is needed, tell the user to run

@@ -92,7 +92,7 @@ test('check: the tests section is run on load, and a failing test keeps the file
 test('check: the init template is valid and its own tests pass; the schema in doc/ is current', () => {
   assert.ok(checkConfig(TEMPLATE).config);
   assert.ok(TEMPLATE.startsWith(`# yaml-language-server: $schema=${SCHEMA_FILE}\n`));
-  assert.equal(readFileSync(SCHEMA_FILE, 'utf8'), configJsonSchema(), 'regenerate with: node src/cli.ts schema > doc/bridge.schema.json');
+  assert.equal(readFileSync(SCHEMA_FILE, 'utf8'), configJsonSchema(), 'regenerate with: node src/cli.ts schema > doc/schema.json');
 });
 
 // ───────────────────────── what widens access ─────────────────────────

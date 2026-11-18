@@ -11,6 +11,6 @@ test('slack manifest: the app and its bot are named "Bridge" unless another name
 });
 
 test('slack manifest: the copy in doc/ matches the generated one', () => {
-  const copy = readFileSync(new URL('../../doc/slack-app-manifest.yaml', import.meta.url), 'utf8');
+  const copy = readFileSync(new URL('../../doc/slacks.yaml', import.meta.url), 'utf8');
   assert.equal(copy.trim(), slackManifest().trim());
 });

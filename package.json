@@ -11,7 +11,7 @@
     "out",
     "src/examples",
     "doc/config.md",
-    "doc/bridge.schema.json"
+    "doc/schema.json"
   ],
   "engines": {
     "node": ">=24"
