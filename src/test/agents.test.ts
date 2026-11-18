@@ -153,7 +153,9 @@ wait
   await agent.stop();
   assert.ok(Date.now() - started >= KILL_GRACE_MS - 100, 'SIGTERM alone does not end it');
   assert.match(await outcome, /claude exited/);
-  assert.equal(alive(command), false, 'the command in its own process group is killed too');
+  // SIGKILL is delivered asynchronously: the command may still be exiting, then a zombie until init (its parent
+  // is gone) reaps it. One that was never sent SIGKILL ignores SIGTERM and stays, so this times out.
+  await until(() => !alive(command), 'the command in its own process group to be killed too');
 });
 
 // ───────────────────────── stdio ─────────────────────────
