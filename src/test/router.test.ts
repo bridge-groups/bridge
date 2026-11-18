@@ -87,6 +87,37 @@ test('DM routes', () => {
   assert.equal(router.matchInbound(msg({ isDM: true, channelName: 'dm', mentioned: false }), { personId: 'bob' })?.agent, 'claude-code');
 });
 
+test('a message that names no agent stays with the agent holding the conversation', () => {
+  const two = new Router(
+    parseConfig(`
+people: { alice: { slack: U1 }, bob: { slack: U2 } }
+im: { slack: { app_token: env:A, bot_token: env:B } }
+agents:
+  cc: { type: claude-code }
+  cx: { type: codex }
+routes:
+  - { from: "slack:dm", when: { sender: [alice, bob] }, to: cc }
+  - { from: "slack:dm", when: { sender: [alice] }, to: cx }
+  - { from: "slack:*", when: { mention: cc, sender: [alice] }, to: cc }
+  - { from: "slack:*", when: { mention: cx, sender: [alice] }, to: cx }
+`),
+  );
+  const dm = (text: string) => msg({ isDM: true, channelName: 'dm', mentioned: false, text });
+  const to = (m: InboundMessage, personId: string, threadAgent?: string) => two.matchInbound(m, { personId, threadAgent })?.agent;
+
+  // A new conversation goes to the first route; naming an agent picks it.
+  assert.equal(to(dm('hi'), 'alice'), 'cc');
+  assert.equal(to(dm('cx fix the login'), 'alice'), 'cx');
+  // Once cx holds the DM, unnamed messages stay with it; naming cc switches back.
+  assert.equal(to(dm('and the tests too'), 'alice', 'cx'), 'cx');
+  assert.equal(two.explainInbound(dm('more'), { personId: 'alice', threadAgent: 'cx' }).trace[0], 'conversation is with cx: its routes are tried first');
+  assert.equal(to(dm('cc review it'), 'alice', 'cx'), 'cc');
+  // The holder's route must still match on its own: bob may not reach cx, so he gets the first route that allows him.
+  assert.equal(to(dm('hi'), 'bob', 'cx'), 'cc');
+  // In a channel thread, a fresh @mention without a name stays with the thread's agent too.
+  assert.equal(to(msg({ text: 'next step' }), 'alice', 'cx'), 'cx');
+});
+
 test('explain gives a reason per route', () => {
   const { trace } = router.explainInbound(msg({ channelName: 'random' }), { personId: 'alice' });
   assert.ok(trace.every((l) => /does not match|different IM|no route matched/.test(l)), trace.join('\n'));

@@ -122,7 +122,8 @@ node out/cli.js worktrees prune --older-than 7d    # remove idle ones with nothi
 
 - An IM route goes to exactly one agent. A route to an agent that runs on this machine (`claude-code`, `codex`, `stdio`) must name `when.sender`, or say `sender: anyone` explicitly.
 - In channels the bot must be @-mentioned, unless `listen: all`. A reply in a thread the agent already holds continues it without a mention. DMs need no mention.
-- `@bot data-agent …` addresses an agent by name when one channel has several.
+- `@bot data-agent …` addresses an agent by name when one channel has several (in a DM, just `data-agent …`).
+- A message that names no agent stays with the agent already holding the conversation (the thread, or the DM until `dm_idle_reset`): that agent's routes are tried first, and each must still match. Otherwise the first matching route wins. Switching agents starts the new agent on a fresh session.
 - `when.mention` makes it explicit: `true` needs the mention (a DM counts as one), `false` needs none (like `listen: all`), and `<agent>` needs the mention *and* the agent's name at the start (`@bot data-agent …`), so several agents can share a channel without catching each other's messages.
 - An agent route (`from: <agent>`) lists what that agent may reach: other agents, and tools as `server.tool` globs.
 - `reset` / `/new` starts a fresh agent session for the thread. A DM session resets after `dm_idle_reset`.

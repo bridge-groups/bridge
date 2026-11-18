@@ -46,7 +46,10 @@ export interface Explanation {
 export interface InboundContext {
   /** Person id from `people`, or undefined for someone unknown. */
   personId?: string;
-  /** Agent already holding this thread; a reply in the thread continues it without a fresh mention. */
+  /**
+   * Agent already holding this conversation (a thread, or a DM until it goes idle). A message that names no
+   * agent goes to it if one of its routes matches, and a reply in its thread needs no fresh mention.
+   */
   threadAgent?: string;
 }
 
@@ -64,12 +67,22 @@ export class Router {
   explainInbound(msg: InboundMessage, ctx: InboundContext): Explanation {
     const trace: string[] = [];
     const { agent: addressed, rest } = this.leadingAgent(msg.text);
+    const target = (route: Route) => (Array.isArray(route.to) ? route.to[0]! : route.to);
 
-    for (const [index, route] of this.cfg.routes.entries()) {
+    // Routes are tried top to bottom; a message that names no agent tries the holder's routes first (in order),
+    // so a conversation stays with its agent. Every route still has to match on its own.
+    const order = [...this.cfg.routes.entries()];
+    const holder = addressed ? undefined : ctx.threadAgent;
+    if (holder && order.some(([, r]) => parseAddress(r.from).kind === 'im' && target(r) === holder)) {
+      trace.push(`conversation is with ${holder}: its routes are tried first`);
+      order.sort(([, a], [, b]) => Number(target(b) === holder) - Number(target(a) === holder));
+    }
+
+    for (const [index, route] of order) {
       const from = parseAddress(route.from);
       const label = `routes[${index}] ${route.from} → ${String(route.to)}`;
       if (from.kind !== 'im') continue;
-      const agent = Array.isArray(route.to) ? route.to[0]! : route.to;
+      const agent = target(route);
 
       if (from.platform !== msg.platform) {
         trace.push(`${label}: different IM`);

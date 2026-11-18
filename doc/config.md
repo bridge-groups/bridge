@@ -50,7 +50,8 @@ checkout (Codex's `sandbox`: `read-only`, or `workspace-write` with `worktree: t
 
 ## Rules a check enforces
 
-- Routing is deny-by-default and first-match. A route from IM to an agent that runs on this machine
+- Routing is deny-by-default and first-match, except that a message naming no agent tries the routes of the
+  agent already holding the conversation first. A route from IM to an agent that runs on this machine
   (`claude-code`, `codex`, `stdio`) needs `when.sender`: a list of people, or `anyone` to opt out on purpose.
 - Credentials never go in the file. Store them with `bridge secret set <name>` and write `secret:<name>`, or
   `env:NAME`; in a header write `Bearer ${secret:name}`. A value that looks like a token is an error.
