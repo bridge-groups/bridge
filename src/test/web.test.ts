@@ -77,10 +77,10 @@ test('dashboard: conversations with branches, discard from the web, activity tra
     assert.equal(sessions[0].branch, '🌿 bridge/x: 1 commit');
     const key = sessions[0].key;
 
-    const preview = await (await post('/api/sessions/discard', { key, preview: true })).json();
+    const preview = (await (await post('/api/sessions/discard', { key, preview: true })).json()) as { text: string };
     assert.equal(preview.text, 'This throws away 1 unmerged commit');
     assert.deepEqual(calls, [], 'preview changes nothing');
-    const done = await (await post('/api/sessions/discard', { key })).json();
+    const done = (await (await post('/api/sessions/discard', { key })).json()) as { text: string };
     assert.equal(done.text, '🗑 discarded');
     assert.deepEqual(calls, ['discard']);
     assert.match(im.transcript().join('\n'), /🗑 discarded\n_\(by alice, via web\)_/);

@@ -1,27 +1,13 @@
 {
+  "extends": ["@tsconfig/node24/tsconfig.json", "@tsconfig/node-ts/tsconfig.json"],
   "compilerOptions": {
-    "target": "es2024",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
     "rootDir": "src",
     "outDir": "out",
-    "strict": true,
     "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "erasableSyntaxOnly": true,
-    "verbatimModuleSyntax": true,
-    "rewriteRelativeImportExtensions": true,
-    "allowImportingTsExtensions": true,
-    "skipLibCheck": true,
-    "declaration": false,
     "sourceMap": true,
-    "types": [
-      "node"
-    ],
     "noEmit": true
   },
-  "include": [
-    "src"
-  ]
+  "include": ["src"]
 }

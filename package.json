@@ -43,6 +43,8 @@
   },
   "devDependencies": {
     "@canons-dev/canons": "^0.2.1",
+    "@tsconfig/node-ts": "23.6.5",
+    "@tsconfig/node24": "24.0.6",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }

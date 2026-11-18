@@ -123,7 +123,10 @@ uses, `npm run build && node out/cli.js service restart`.
 
 - Node runs the `.ts` files directly, so only erasable syntax: no parameter properties, enums or namespaces
   (`erasableSyntaxOnly`). Import with the `.ts` extension; `tsc` rewrites it for `out/`.
-- `strict` and `noUncheckedIndexedAccess` are on; don't silence them with `!` or `any` when a real check fits.
+- `tsconfig.json` extends the official bases `@tsconfig/node24` (the oldest Node we support) and `@tsconfig/node-ts`
+  (type stripping); it adds only paths and stricter checks. Raise the Node base together with `engines`.
+- `strict`, `noUncheckedIndexedAccess` and the unused-code checks are on; don't silence them with `!` or `any` when a
+  real check fits.
 - Keep dependencies few. Prefer Node built-ins (`node:sqlite`, `node:test`, `fetch`).
 
 ## Tests
