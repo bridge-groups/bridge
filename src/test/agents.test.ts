@@ -78,6 +78,16 @@ printf '{"type":"result","result":"resume=%s","session_id":"S1"}\\n' "$resume"
   assert.equal((await agent.run(turn('x', { agentSessionId: 'S1@000000000000' }))).text, 'resume=none');
 });
 
+test('claude-code: a failed run is answered with the reasons Claude Code gives, not just the subtype', async () => {
+  // What `claude -p --resume <unknown id>` prints (captured from Claude Code): no `result`, the reason in `errors`.
+  const fake = script(tmp('ab-cc-'), 'claude', `#!/bin/sh
+cat > /dev/null
+echo '{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"X","total_cost_usd":0,"errors":["No conversation found with session ID: X"]}'
+`);
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());
+  assert.equal((await agent.run(turn('hi'))).text, '⚠️ error_during_execution: No conversation found with session ID: X');
+});
+
 test('claude-code: a process that exits without reading its prompt fails the turn instead of crashing (EPIPE)', async () => {
   const fake = script(tmp('ab-cc-'), 'claude', '#!/bin/sh\necho "bad flag" >&2\nexit 3\n');
   const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());

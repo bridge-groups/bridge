@@ -64,7 +64,7 @@ export class ClaudeCodeAgent extends CliAgent {
             text: overBudget
               ? `💸 Stopped: this turn reached the conversation's remaining budget ($${turn.budgetUsd?.toFixed(2)}). Send "reset" to start a new conversation with a fresh budget.`
               : ev.is_error
-                ? `⚠️ ${ev.result ?? ev.subtype ?? 'Claude Code failed'}`
+                ? `⚠️ ${failure(ev)}`
                 : String(ev.result ?? ''),
             agentSessionId: typeof ev.session_id === 'string' ? ev.session_id : undefined,
             costUsd: typeof ev.total_cost_usd === 'number' ? ev.total_cost_usd : undefined,
@@ -74,6 +74,16 @@ export class ClaudeCodeAgent extends CliAgent {
       result: () => result,
     };
   }
+}
+
+/**
+ * Why a failed run failed. A run that fails before the model answers (e.g. "No conversation found with session ID")
+ * has no `result`, only the subtype and its reasons in `errors`; keep both so the reply says what went wrong.
+ */
+function failure(ev: any): string {
+  const errors = Array.isArray(ev.errors) ? ev.errors.filter((e: unknown) => typeof e === 'string' && e) : [];
+  const reason = ev.result ?? ev.subtype ?? 'Claude Code failed';
+  return errors.length ? `${reason}: ${errors.join('; ')}` : String(reason);
 }
 
 function describeToolUse(name: string, input: any): string {
