@@ -85,6 +85,9 @@ User-facing docs are in [README.md](README.md); design notes and references live
 - **Test data**: tests use only in-memory stores, temp folders, fake IMs and local fake servers (see Tests below).
   Manual checks run a throwaway instance from `tmp/` with its own config and `server.data_dir`, talking through the
   terminal (`bridge chat`). The owner's own IM accounts, keychain and `~/.bridge` are used only when they ask.
+  Nothing that tests GitHub (pushing a conversation branch, `pr`, issues or comments through a GitHub tool server)
+  runs against this repository: when such a check is needed, use a dedicated test repository, created for the
+  purpose with the owner's go-ahead and named here.
 
 ## Code health comes first
 
