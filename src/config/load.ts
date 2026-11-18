@@ -100,6 +100,9 @@ export function semanticCheck(cfg: BridgeConfig): ConfigIssue[] {
       if (agent.type !== 'webhook' && route.when.sender === undefined) {
         issue(where, `"${target}" runs on this machine, so the route needs when.sender (list people, or "anyone" to opt out)`);
       }
+      if (from.platform === 'discord' && route.when.mention === false && cfg.im.discord && !cfg.im.discord.message_content) {
+        issue([...where, 'when', 'mention'], 'Discord only shows the bot messages that mention it: mention: false needs im.discord.message_content: true');
+      }
       if (typeof route.when.mention === 'string' && route.when.mention !== target) {
         issue([...where, 'when', 'mention'], `when.mention "${route.when.mention}" should name the route's agent "${target}"`);
       }

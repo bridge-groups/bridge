@@ -1,12 +1,12 @@
 # Bridge
 
-Connects **Agents ↔ IM**, **Agents ↔ Agents** and **Agents ↔ Tools**. Chat messages from Slack, Feishu / Lark or
-Telegram reach agents such as Claude Code or Codex; each agent turn can post updates, ask a person, hand work to
+Connects **Agents ↔ IM**, **Agents ↔ Agents** and **Agents ↔ Tools**. Chat messages from Slack, Feishu / Lark,
+Discord or Telegram reach agents such as Claude Code or Codex; each agent turn can post updates, ask a person, hand work to
 another agent and call the tool servers its routes allow; policies decide approvals and budgets; everything lands
 in an audit trail with secrets redacted.
 
 - **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound, so you need no public URL.
-  Telegram (long polling) is written but not yet tested against the real service.
+  Discord (Gateway WebSocket) and Telegram (long polling) are written but not yet tested against the real services.
 - **Tools**: MCP servers, local or remote. The bridge holds the credentials and gives each agent only what its
   routes allow.
 - **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON
@@ -86,6 +86,12 @@ Changing IM credentials needs a restart.
 - **Feishu / Lark**: `bridge feishu setup` lists the app's features, the scopes to import, and the events and
   callbacks to subscribe. Replies are message cards; headings and tables are rewritten for card markdown. People are
   mapped by open_id (`people: { alice: { feishu: ou_xxx } }`); `bridge up` prints the open_id of anyone it ignores.
+- **Discord**: `bridge discord setup [application id]` lists the steps in the Developer Portal and prints the invite
+  link with the permissions the bot needs. Each conversation in a channel is a thread opened from its first
+  message; DMs are plain. People are mapped by user id (`people: { alice: { discord: "123…" } }`). Without
+  `message_content: true` (a privileged intent to switch on in the portal) the bot only reads DMs, mentions and
+  replies to it, so follow-ups in a thread mention it too, and `mention: false` routes are refused. What agents write
+  pings nobody.
 
 Approvals and confirmations are buttons where the IM has them; typing `approve` / `deny` / `yes` also works.
 Progress shows in a placeholder message that is edited as the agent works (`defaults.progress`: `collapsed`,
@@ -190,7 +196,7 @@ tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` sho
 
 ## Not in v0.1 yet
 
-- Discord; Telegram tested against the real service
+- Discord and Telegram tested against the real services
 - A2A
 - A spending limit per sender outside `people:` (today the budget is per conversation, so a new thread starts a
   fresh one)

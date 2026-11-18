@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ConfigError, parseConfig } from '../config/load.ts';
+import { personIdOn } from '../config/schema.ts';
 
 const base = `
 people: { alice: { trust: owner, slack: U1 } }
@@ -68,4 +69,22 @@ test('durations are validated; retention defaults to 30d and can be off', () => 
   assert.throws(() => parseConfig(base + `defaults: { retention: forever }\n`), ConfigError);
   assert.throws(() => parseConfig(base + `policies:\n  - { match: { tool: "*" }, approve_by: [alice], timeout: 30d }\n`), /too long for a timer/);
   assert.throws(() => parseConfig(base.replace('url: "http://localhost:1/x" }', 'url: "http://localhost:1/x", timeout: soon }')), ConfigError);
+});
+
+test('discord: people ids, and mention: false needs the Message Content intent', () => {
+  const discord = (content: boolean) => `
+people: { alice: { trust: owner, discord: "111" } }
+im: { discord: { bot_token: env:D, message_content: ${content} } }
+agents: { remote: { type: webhook, url: "http://localhost:1/x" } }
+routes:
+  - { from: "discord:#general", when: { mention: false }, to: remote }
+`;
+  assert.throws(
+    () => parseConfig(discord(false)),
+    (e: unknown) => e instanceof ConfigError && /message_content: true/.test(e.message),
+  );
+  const cfg = parseConfig(discord(true));
+  assert.equal(personIdOn(cfg.people.alice!, 'discord'), '111');
+  const mentioned = parseConfig(discord(false).replace(', message_content: false', '').replace('mention: false', 'sender: anyone'));
+  assert.equal(mentioned.im.discord?.message_content, false, 'off unless asked for');
 });

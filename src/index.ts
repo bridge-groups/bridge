@@ -31,6 +31,7 @@ export type { Choice, ImAdapter, InboundAction, OutboundMessage } from './adapte
 export { SlackAdapter } from './adapters/im/slack.ts';
 export { FeishuAdapter } from './adapters/im/feishu.ts';
 export { TelegramAdapter } from './adapters/im/telegram.ts';
+export { DiscordAdapter } from './adapters/im/discord.ts';
 
 // Agents reached over the network
 export type { AgentAdapter, AgentReply, AgentTurn, Workspace } from './adapters/agent/types.ts';

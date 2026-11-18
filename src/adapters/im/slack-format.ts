@@ -1,4 +1,4 @@
-import { cells, headingText, isTableRow, isTableSeparator, plain } from './markdown.ts';
+import { cells, headingText, isTableRow, isTableSeparator, plain, width } from './markdown.ts';
 
 /**
  * Standard Markdown (what agents write) → Slack mrkdwn.
@@ -136,27 +136,6 @@ function renderGrid(rows: string[][]): string {
 
 function pad(s: string, w: number) {
   return s + ' '.repeat(Math.max(0, w - width(s)));
-}
-
-/** Display width in a monospace font: CJK and full-width characters take two columns. */
-export function width(s: string): number {
-  let n = 0;
-  for (const ch of s) {
-    const cp = ch.codePointAt(0)!;
-    n +=
-      (cp >= 0x1100 && cp <= 0x115f) ||
-      (cp >= 0x2e80 && cp <= 0xa4cf) ||
-      (cp >= 0xac00 && cp <= 0xd7a3) ||
-      (cp >= 0xf900 && cp <= 0xfaff) ||
-      (cp >= 0xfe30 && cp <= 0xfe4f) ||
-      (cp >= 0xff00 && cp <= 0xff60) ||
-      (cp >= 0xffe0 && cp <= 0xffe6) ||
-      (cp >= 0x1f300 && cp <= 0x1faff) ||
-      (cp >= 0x20000 && cp <= 0x3fffd)
-        ? 2
-        : 1;
-  }
-  return n;
 }
 
 /**

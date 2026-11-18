@@ -150,7 +150,7 @@ button:disabled { opacity: .5; cursor: default; }
   function clock(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
   function money(n) { return '$' + (n || 0).toFixed(2); }
 
-  var PLATFORM = { slack: 'Slack', feishu: 'Feishu / Lark', telegram: 'Telegram', local: 'Terminal' };
+  var PLATFORM = { slack: 'Slack', feishu: 'Feishu / Lark', telegram: 'Telegram', discord: 'Discord', local: 'Terminal' };
   function describeKey(key) {
     var p = key.split(':');
     var name = PLATFORM[p[0]] || p[0];

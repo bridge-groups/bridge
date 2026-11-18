@@ -22,6 +22,7 @@ import { LocalConsoleAdapter } from './adapters/im/local.ts';
 import { SlackAdapter } from './adapters/im/slack.ts';
 import { TelegramAdapter } from './adapters/im/telegram.ts';
 import { FeishuAdapter } from './adapters/im/feishu.ts';
+import { DISCORD_PERMISSIONS, DiscordAdapter } from './adapters/im/discord.ts';
 import type { ImAdapter } from './adapters/im/types.ts';
 import { ToolHub } from './mcp/tools.ts';
 import { OAuthFlows } from './mcp/oauth.ts';
@@ -50,6 +51,7 @@ Usage: bridge <command> [options]
                              --from slack:#dev --sender alice [--text "..."] [--mention] [--dm]
   slack manifest [name]    print a Slack app manifest (Socket Mode, DMs, channels)
   feishu setup             how to create the Feishu / Lark app, with the scopes to import
+  discord setup [app-id]   how to create the Discord bot; with its application id, the invite link
   secret set <name>        store a secret in the OS keychain (value read from stdin)
   service install|uninstall|restart|status
                            run the bridge in the background via launchd (macOS)
@@ -210,6 +212,12 @@ async function main() {
       process.stdout.write(FEISHU_SETUP);
       return;
     }
+    case 'discord': {
+      if (sub !== 'setup') fail('usage: bridge discord setup [application id]');
+      if (arg !== undefined && !/^\d{15,25}$/.test(arg)) fail('the application id is a number, e.g. 123456789012345678');
+      process.stdout.write(discordSetup(arg));
+      return;
+    }
     case 'slack': {
       if (sub !== 'manifest') fail('usage: bridge slack manifest [app name]');
       process.stdout.write(slackManifest(arg));
@@ -355,6 +363,9 @@ function buildIms(cfg: BridgeConfig, dataDir: string, resolveSecret: SecretResol
       new FeishuAdapter({ appId: cfg.im.feishu.app_id, appSecret: resolveSecret(cfg.im.feishu.app_secret), domain: cfg.im.feishu.domain }),
     );
   }
+  if (cfg.im.discord) {
+    ims.push(new DiscordAdapter({ botToken: resolveSecret(cfg.im.discord.bot_token), messageContent: cfg.im.discord.message_content }));
+  }
   if (!ims.length) fail('no IM configured under im: — add one, or try "bridge chat --as <person>"');
   return ims;
 }
@@ -378,7 +389,8 @@ async function doctor(configPath: string) {
   if (!cfg) process.exit(1);
   const c = cfg;
   for (const [im, conf] of Object.entries(c.im)) {
-    for (const [field, ref] of Object.entries(conf as Record<string, string>)) {
+    for (const [field, ref] of Object.entries(conf as Record<string, unknown>)) {
+      if (typeof ref !== 'string') continue; // switches such as discord.message_content
       await check(`${im}.${field}`, () => void keychainSecrets(ref));
     }
   }
@@ -542,6 +554,30 @@ ${JSON.stringify(
      im:
        feishu: { app_id: cli_xxx, app_secret: secret:feishu_app_secret, domain: feishu }   # or lark
 `;
+
+function discordSetup(appId?: string): string {
+  const invite = `https://discord.com/oauth2/authorize?client_id=${appId ?? '<application id>'}&scope=bot&permissions=${DISCORD_PERMISSIONS}`;
+  return `Discord Developer Portal (discord.com/developers/applications) → New Application named "Bridge", then:
+
+1. General Information → copy the Application ID${appId ? '' : ' (run "bridge discord setup <application id>" for a ready invite link)'}.
+2. Bot → Reset Token, copy it, and store it:
+     bridge secret set discord_bot_token
+   Under Privileged Gateway Intents, Message Content is only needed for routes with \`mention: false\`
+   (also set message_content: true below). Without it the bot reads DMs, messages that @-mention it and
+   replies to it, so follow-ups in a thread must mention the bot too. Leave Public Bot off if only you invite it.
+3. Invite the bot to your server (you need Manage Server there):
+     ${invite}
+   Permissions: View Channels, Send Messages, Read Message History, Create Public Threads,
+   Send Messages in Threads.
+4. In bridge.yaml:
+     im:
+       discord: { bot_token: secret:discord_bot_token }   # message_content: true for mention: false routes
+     people:
+       me: { discord: "<your user id>" }   # Discord → Settings → Advanced → Developer Mode, then right-click yourself → Copy User ID
+   Routes use the channel name: discord:#general, discord:dm, discord:*. Each conversation in a channel
+   gets its own thread, opened from the message that started it.
+`;
+}
 
 function fail(msg: string): never {
   console.error(msg);

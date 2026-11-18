@@ -520,6 +520,8 @@ test('trace redaction: token formats and registered secret values', () => {
     'ya29.a0AfH6SMBx0123456789abcdefghijkl',
     'AKIAIOSFODNN7EXAMPLE',
     't-g1044ghJRUIJJ5ELPZ5MKPPTNDF4K2XZ3JLXR2OT',
+    // A made-up Discord bot token, joined at runtime so secret scanners don't take the source for a real one.
+    ['MTIzNDU2Nzg5MDEyMzQ1Njc4', 'GhIjKl', 'abcdefghijklmnopqrstuvwxyz0123456789AB'].join('.'),
     '{"app_secret":"s3cr3t-value-123"}',
   ];
   for (const c of cases) assert.match(redact(c), /\[redacted\]/, c);

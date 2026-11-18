@@ -17,6 +17,7 @@ people:
     # slack: U0123456789      # your Slack member id
     # feishu: ou_xxx          # your Feishu / Lark open_id (\`bridge up\` prints unknown ones)
     # telegram: "123456789"   # your Telegram user id
+    # discord: "123456789012345678"   # your Discord user id (Developer Mode → Copy User ID)
 
 # IM connections (outbound only; no public URL needed). Store tokens with:
 #   bridge secret set slack_app_token
@@ -30,6 +31,8 @@ im: {}
   #   domain: feishu          # or lark (larksuite.com)
   # telegram:
   #   bot_token: env:TELEGRAM_BOT_TOKEN
+  # discord:                 # see: bridge discord setup
+  #   bot_token: secret:discord_bot_token
 
 agents:
   echo:

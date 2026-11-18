@@ -12,6 +12,7 @@ const TOKEN_PATTERNS: Array<[RegExp, string]> = [
   [/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[redacted]'], // AWS access key ids
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted]'], // JWTs
   [/\b[tua]-[A-Za-z0-9]{30,}\b/g, '[redacted]'], // Feishu / Lark tenant, user and app access tokens
+  [/\b[MNO][A-Za-z0-9_-]{22,27}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}/g, '[redacted]'], // Discord bot tokens
   [/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/-]{16,}=*/gi, '$1 [redacted]'], // Authorization header schemes
 ];
 

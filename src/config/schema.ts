@@ -28,13 +28,14 @@ const Person = z
     slack: z.string().optional(),
     telegram: z.string().optional(),
     feishu: z.string().optional(),
+    discord: z.string().optional(),
   })
   .strict();
 export type Person = z.infer<typeof Person>;
 
 /** A person's user id on an IM (`local`, the console, has none: people are named directly there). */
 export function personIdOn(person: Person, platform: string): string | undefined {
-  return platform === 'slack' || platform === 'telegram' || platform === 'feishu' ? person[platform] : undefined;
+  return platform === 'slack' || platform === 'telegram' || platform === 'feishu' || platform === 'discord' ? person[platform] : undefined;
 }
 
 const SlackConfig = z
@@ -50,11 +51,23 @@ const FeishuConfig = z
   })
   .strict();
 
+const DiscordConfig = z
+  .object({
+    bot_token: SecretRef,
+    /**
+     * Ask for the privileged Message Content intent (switch it on under Bot in the Developer Portal). Without it
+     * the bot only reads DMs, messages that @-mention it and replies to it, so `mention: false` routes need it.
+     */
+    message_content: z.boolean().default(false),
+  })
+  .strict();
+
 const ImConfig = z
   .object({
     slack: SlackConfig.optional(),
     telegram: TelegramConfig.optional(),
     feishu: FeishuConfig.optional(),
+    discord: DiscordConfig.optional(),
   })
   .strict()
   .default({});

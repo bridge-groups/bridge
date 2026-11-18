@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toSlackMrkdwn, truncateMrkdwn, width } from '../adapters/im/slack-format.ts';
+import { toSlackMrkdwn, truncateMrkdwn } from '../adapters/im/slack-format.ts';
+import { width } from '../adapters/im/markdown.ts';
+import { toDiscordMarkdown, truncateDiscord } from '../adapters/im/discord-format.ts';
 import { isPersonMessage } from '../adapters/im/slack.ts';
 import { split } from '../core/bridge.ts';
 
@@ -93,4 +95,19 @@ test('wide tables become one record per row', () => {
       '• policy.ts: `maxHops`',
     ].join('\n'),
   );
+});
+
+test('discord: tables become a grid or records, deep headings ###, rules and task boxes drawn, code untouched', () => {
+  assert.equal(toDiscordMarkdown('| a | 名前 |\n|---|---|\n| 1 | x |'), '```\na  名前\n─  ────\n1  x\n```');
+  const wide = `| name | note |\n|---|---|\n| **one** | ${'x'.repeat(70)} |`;
+  assert.equal(toDiscordMarkdown(wide), `**one**\n- note: ${'x'.repeat(70)}`);
+  assert.equal(toDiscordMarkdown('#### Deep\n## Kept\n---\n- [x] done\n- [ ] todo'), '### Deep\n## Kept\n──────────\n- ☑ done\n- ☐ todo');
+  assert.equal(toDiscordMarkdown('```md\n| a | b |\n|---|---|\n#### x\n```'), '```md\n| a | b |\n|---|---|\n#### x\n```');
+});
+
+test('discord: text is cut to the limit without leaving a code fence open', () => {
+  const cut = truncateDiscord('```\n' + 'line\n'.repeat(1000) + '```', 2000);
+  assert.ok(cut.length <= 2000);
+  assert.ok(cut.endsWith('```\n…'));
+  assert.equal(truncateDiscord('short', 2000), 'short');
 });

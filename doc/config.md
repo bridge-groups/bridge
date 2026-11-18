@@ -121,8 +121,8 @@ mentioned); `text` defaults to `hello`. To see why a message routes the way it d
 
 | Section | Holds | Notes |
 | --- | --- | --- |
-| `people` | `<id>: { trust, slack, feishu, telegram }` | `trust`: `owner`, `trusted`, `member` (default), `agent`, `external`. Platform ids: Slack member id, Feishu / Lark open_id |
-| `im` | `slack`, `feishu`, `telegram` connections | Credentials as `secret:` / `env:` references; `feishu.domain`: `feishu` or `lark`. Changing them needs a restart |
+| `people` | `<id>: { trust, slack, feishu, telegram, discord }` | `trust`: `owner`, `trusted`, `member` (default), `agent`, `external`. Platform ids: Slack member id, Feishu / Lark open_id, Telegram and Discord user id |
+| `im` | `slack`, `feishu`, `telegram`, `discord` connections | Credentials as `secret:` / `env:` references; `feishu.domain`: `feishu` or `lark`; `discord.message_content`: ask for the privileged intent that `mention: false` routes need (default `false`). Changing them needs a restart |
 | `agents` | `<name>: { type: claude-code \| codex \| webhook \| stdio, … }` | claude-code: `cwd`, `permission_mode`, `allowed_tools`, `model`, `worktree`, `worktree_links`, `git_token`. codex: `cwd`, `sandbox`, `model`, and the same `worktree` settings. webhook: `url`, `headers`, `timeout`. stdio: `command`, `args`, `cwd`, `env`, `timeout` |
 | `tools` | `<name>: { command, args, env }` or `{ url, headers, oauth }` | MCP tool servers; `oauth: true` signs in with `bridge auth <name>` |
 | `routes` | `{ from, when, to }` | `from`: an IM address or an agent. `when`: `mention`, `sender`. `to`: one agent (from IM), or agents and `server.tool` globs (from an agent) |

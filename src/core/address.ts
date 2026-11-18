@@ -9,7 +9,7 @@ export type Address =
   | { kind: 'im'; platform: string; channel: string }
   | { kind: 'agent'; name: string };
 
-export const IM_PLATFORMS = new Set(['slack', 'telegram', 'feishu', 'local']);
+export const IM_PLATFORMS = new Set(['slack', 'telegram', 'feishu', 'discord', 'local']);
 
 export function parseAddress(s: string): Address {
   const i = s.indexOf(':');
