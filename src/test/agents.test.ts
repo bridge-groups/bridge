@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeCodeAgent } from '../adapters/agent/claude-code.ts';
+import { envSecrets } from '../core/secrets.ts';
 import { KILL_GRACE_MS } from '../adapters/agent/process-tree.ts';
 import { StdioAgent } from '../adapters/agent/stdio.ts';
 import type { AgentTurn } from '../adapters/agent/types.ts';
@@ -63,7 +64,7 @@ printf '{"type":"result","result":"resume=%s","session_id":"S1"}\\n' "$resume"
   const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
   git('init', '-q', '-b', 'main');
   git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
-  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: repo, worktree: true, worktree_dir: join(repo, '..', `${repo.split('/').pop()}-wts`) }));
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: repo, worktree: true, worktree_dir: join(repo, '..', `${repo.split('/').pop()}-wts`) }), envSecrets());
 
   const first = await agent.run(turn('hi'));
   assert.equal(first.text, 'resume=none');
@@ -86,7 +87,7 @@ printf '{"type":"result","result":"resume=%s","session_id":"S1"}\\n' "$resume"
 
 test('claude-code: a process that exits without reading its prompt fails the turn instead of crashing (EPIPE)', async () => {
   const fake = script(tmp('ab-cc-'), 'claude', '#!/bin/sh\necho "bad flag" >&2\nexit 3\n');
-  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }));
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());
   await assert.rejects(agent.run(turn('x'.repeat(4 * 1024 * 1024))), /claude exited/);
 });
 
@@ -99,7 +100,7 @@ echo $! > "${pidFile}.tmp" && mv "${pidFile}.tmp" "${pidFile}"
 cat > /dev/null
 wait
 `);
-  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }));
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());
 
   const running = agent.run(turn('work'));
   const outcome = running.then(() => 'resolved', (e: Error) => e.message);
@@ -129,7 +130,7 @@ bash -c 'trap "" TERM; echo $$ > "${pidFile}.tmp" && mv "${pidFile}.tmp" "${pidF
 cat > /dev/null
 wait
 `);
-  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }));
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());
   const outcome = agent.run(turn('work')).then(() => 'resolved', (e: Error) => e.message);
   await until(() => existsSync(pidFile), 'the fake claude to start its command');
   const command = Number(readFileSync(pidFile, 'utf8'));
@@ -159,7 +160,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   // anything else: never answered
 });
 `);
-  const agent = new StdioAgent('st', { type: 'stdio', command: process.execPath, args: [agentScript], env: {}, timeout });
+  const agent = new StdioAgent('st', { type: 'stdio', command: process.execPath, args: [agentScript], env: {}, timeout }, envSecrets());
   const received = () => readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   return { agent, received };
 }
@@ -210,7 +211,7 @@ const { id } = JSON.parse(s.split('\\n')[0]);
 process.stdout.write(JSON.stringify({ type: 'progress', id, text: 'closed' }) + '\\n');
 setInterval(() => {}, 1000);
 `);
-  const agent = new StdioAgent('st', { type: 'stdio', command: process.execPath, args: [agentScript], env: {}, timeout: '30m' });
+  const agent = new StdioAgent('st', { type: 'stdio', command: process.execPath, args: [agentScript], env: {}, timeout: '30m' }, envSecrets());
   try {
     let closed!: () => void;
     const isClosed = new Promise<void>((r) => (closed = r));

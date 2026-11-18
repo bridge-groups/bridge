@@ -12,21 +12,25 @@ import { configJsonSchema } from './config/json-schema.ts';
 import type { BridgeConfig } from './config/schema.ts';
 import { Bridge } from './core/bridge.ts';
 import { Router } from './core/router.ts';
-import { Store } from './core/store.ts';
+import { SqliteStore } from './core/store.ts';
+import { Redactor } from './core/redact.ts';
+import { envRefs, type SecretResolver } from './core/secrets.ts';
+import { localAgents } from './adapters/agent/local.ts';
+import { keychainStorage } from './keychain-oauth.ts';
 import { LocalConsoleAdapter } from './adapters/im/local.ts';
 import { SlackAdapter } from './adapters/im/slack.ts';
 import { TelegramAdapter } from './adapters/im/telegram.ts';
 import { FeishuAdapter } from './adapters/im/feishu.ts';
 import type { ImAdapter } from './adapters/im/types.ts';
 import { ToolHub } from './mcp/tools.ts';
-import { keychainStorage, OAuthFlows } from './mcp/oauth.ts';
-import { localBaseUrl } from './web/api.ts';
-import { createServer } from 'node:http';
-import { envRefs, keychainRead, resolveSecret, setSecret } from './secrets.ts';
+import { OAuthFlows } from './mcp/oauth.ts';
+import { handleWeb, localBaseUrl } from './web/api.ts';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { keychainRead, keychainSecrets, setSecret } from './secrets.ts';
 import { TEMPLATE } from './template.ts';
 import { slackManifest } from './slack-manifest.ts';
-import { expandHome, listWorktrees, removeAt, sessionSlug, statusAt } from './adapters/agent/worktree.ts';
-import { parseDuration } from './core/address.ts';
+import { expandHome, listWorktrees, removeAt, statusAt } from './adapters/agent/worktree.ts';
+import { parseDuration, sessionSlug } from './core/address.ts';
 import { installService, restartService, serviceStatus, uninstallService } from './service.ts';
 
 const HELP = `bridge — connect agents to IM, to each other, and to tools
@@ -93,7 +97,7 @@ async function main() {
       return;
     }
     case 'up':
-      return run(configPath, (cfg) => buildIms(cfg, resolve(configPath, '..', cfg.server.data_dir)));
+      return run(configPath, (cfg, secrets) => buildIms(cfg, resolve(configPath, '..', cfg.server.data_dir), secrets));
     case 'chat': {
       if (!values.as) fail('chat needs --as <person id from people:>');
       return run(configPath, () => [new LocalConsoleAdapter({ as: values.as! })], { quiet: true });
@@ -249,7 +253,7 @@ async function main() {
   }
 }
 
-async function run(configPath: string, ims: (cfg: BridgeConfig) => ImAdapter[], opts: { quiet?: boolean } = {}) {
+async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretResolver) => ImAdapter[], opts: { quiet?: boolean } = {}) {
   load(configPath); // exits with the file's problems listed
   const log = opts.quiet ? (l: string) => void (l.startsWith('inbound error') && console.error(l)) : (l: string) => console.log(l);
   let bridge: Bridge | undefined;
@@ -260,13 +264,33 @@ async function run(configPath: string, ims: (cfg: BridgeConfig) => ImAdapter[], 
     applied: AppliedConfig.for(configPath),
     apply: (next) => bridge?.reload(next),
     log: (l) => console.log(l),
-    onPending: (pending, signal) => bridge?.askOwnersAboutConfig(pending, signal),
+    onPending: (pending, signal) =>
+      void bridge?.askOwnersAboutConfig(pending, signal).catch((err) => console.error(`config confirmation not sent: ${(err as Error).message}`)),
   });
   const cfg = gate.initial();
   const store = openStore(cfg, configPath);
-  gate.onAudit((event) => store.trace('config', 'config', event.by ?? 'file', event));
+  gate.onAudit((event) => store.trace('config', 'config', event.by ?? 'file', JSON.stringify(event)));
   const filesDir = join(resolve(configPath, '..', cfg.server.data_dir), 'files');
-  bridge = new Bridge({ cfg, store, ims: ims(cfg), filesDir, log });
+  // Credentials come from the keychain; the IM tokens resolved here are kept out of the audit trail too.
+  const redactor = new Redactor();
+  const secrets: SecretResolver = (ref) => {
+    const value = keychainSecrets(ref);
+    if (value !== ref) redactor.add(value);
+    return value;
+  };
+  const web = (req: IncomingMessage, res: ServerResponse, url: URL) => handleWeb(bridge!, req, res, url);
+  bridge = new Bridge({
+    cfg,
+    store,
+    ims: ims(cfg, secrets),
+    secrets,
+    redactor,
+    agentFactory: localAgents,
+    oauthStorage: keychainStorage(),
+    extraRoutes: web,
+    filesDir,
+    log,
+  });
   bridge.attachConfigGate(gate);
   const { mcpUrl } = await bridge.start();
   log(`bridge up — MCP hub ${mcpUrl}, ${Object.keys(cfg.agents).length} agents, ${cfg.routes.length} routes`);
@@ -290,7 +314,7 @@ async function run(configPath: string, ims: (cfg: BridgeConfig) => ImAdapter[], 
   process.once('SIGTERM', shutdown);
 }
 
-function buildIms(cfg: BridgeConfig, dataDir: string): ImAdapter[] {
+function buildIms(cfg: BridgeConfig, dataDir: string, resolveSecret: SecretResolver): ImAdapter[] {
   const ims: ImAdapter[] = [];
   if (cfg.im.slack) {
     ims.push(new SlackAdapter({ appToken: resolveSecret(cfg.im.slack.app_token), botToken: resolveSecret(cfg.im.slack.bot_token) }));
@@ -327,7 +351,7 @@ async function doctor(configPath: string) {
   const c = cfg;
   for (const [im, conf] of Object.entries(c.im)) {
     for (const [field, ref] of Object.entries(conf as Record<string, string>)) {
-      await check(`${im}.${field}`, () => void resolveSecret(ref));
+      await check(`${im}.${field}`, () => void keychainSecrets(ref));
     }
   }
   for (const [name, a] of Object.entries(c.agents)) {
@@ -344,7 +368,7 @@ async function doctor(configPath: string) {
       });
     }
   }
-  const hub = new ToolHub(c.tools, { oauth: { storage: keychainStorage(), redirectUrl: `${localBaseUrl(c.server)}/oauth/callback` } });
+  const hub = new ToolHub(c.tools, { secrets: keychainSecrets, oauth: { storage: keychainStorage(), redirectUrl: `${localBaseUrl(c.server)}/oauth/callback` } });
   for (const name of Object.keys(c.tools)) {
     await check(`tool server ${name}`, async () => `${(await hub.listTools(name)).length} tools`);
   }
@@ -422,9 +446,9 @@ function load(path: string, exitOnError = true): BridgeConfig {
   }
 }
 
-function openStore(cfg: BridgeConfig, configPath: string): Store {
+function openStore(cfg: BridgeConfig, configPath: string): SqliteStore {
   const dir = resolve(configPath, '..', cfg.server.data_dir);
-  return new Store(join(dir, 'bridge.db'));
+  return new SqliteStore(join(dir, 'bridge.db'));
 }
 
 function readSecretValue(prompt: string): Promise<string> {
@@ -509,7 +533,7 @@ function openBrowser(url: string) {
 /** Sign in to an OAuth tool server: through the running bridge, or a temporary local listener. */
 async function auth(cfg: BridgeConfig, server: string | undefined, signOut: boolean) {
   const base = localBaseUrl(cfg.server);
-  const flows = new OAuthFlows(() => cfg.tools, keychainStorage(), `${base}/oauth/callback`);
+  const flows = new OAuthFlows(() => cfg.tools, keychainStorage(), `${base}/oauth/callback`, keychainSecrets);
   const oauthServers = Object.keys(cfg.tools).filter((n) => flows.status(n) !== 'not-oauth');
   if (!server) {
     if (!oauthServers.length) return void console.log('No tool servers use OAuth (add  oauth: true  to an HTTP tool server).');

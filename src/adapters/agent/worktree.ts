@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, symlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { sessionSlug } from '../../core/address.ts';
 
 export interface Worktree {
   /** Where the agent should run: the same subdirectory as the configured cwd, inside the worktree. */
@@ -475,17 +475,6 @@ export async function listWorktrees(baseCwd: string): Promise<{ root: string; pa
     if (entry.startsWith('branch refs/heads/bridge/')) out.push({ root, path, branch: entry.slice('branch refs/heads/'.length) });
   }
   return out;
-}
-
-export function sessionSlug(sessionKey: string): string {
-  const readable = sessionKey
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40)
-    .replace(/-$/, '');
-  const hash = createHash('sha1').update(sessionKey).digest('hex').slice(0, 6);
-  return `${readable}-${hash}`;
 }
 
 export function expandHome(p: string) {

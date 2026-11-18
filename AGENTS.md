@@ -80,13 +80,16 @@ User-facing docs are in [README.md](README.md); design notes and references live
 
 ```
 src/                     all source code
-  cli.ts                 commands (bridge init | up | chat | doctor | auth | dashboard | service | …)
+  index.ts               the library's entry point (@bridge-groups/bridge): nothing CLI-only or local
+  local.ts               opt-in local agents (@bridge-groups/bridge/local)
+  cli.ts                 commands (bridge init | up | chat | check | doctor | auth | dashboard | service | …);
+                         with secrets.ts, keychain-oauth.ts, service.ts, template.ts, config/gate.ts, web/
   config/                bridge.yaml schema (zod), checks with line numbers, tests, change review
   core/                  router, policies, SQLite store, the Bridge orchestrator
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
   web/                   local dashboard: JSON API + one self-contained page
   adapters/im/           Slack, Feishu / Lark, Telegram, local console (+ Markdown renderers)
-  adapters/agent/        claude-code (with git worktrees), webhook, stdio
+  adapters/agent/        webhook (remote); claude-code (with git worktrees) and stdio (local, opt-in)
   examples/              example agents (shipped)
   test/                  node:test suites, helpers and fixtures (not shipped)
 doc/                     documentation and reference files (bridge.schema.json is generated: `bridge schema`)
@@ -95,6 +98,8 @@ tmp/                     scratch files, one-off scripts, handoffs (git-ignored)
 .agents/                 agent rules and skills (canons); CLAUDE.md and .claude/ link here
 ```
 
+The library (`src/index.ts` and what it loads) never reads files it wasn't given, the keychain or the dashboard,
+and never runs local agents unless the app passes `localAgents`; `src/test/library.test.ts` checks the import graph.
 Everything that is code lives under `src/`. Documentation goes in `doc/`, except `README.md` and this file.
 What the project deliberately does not do is listed under "Not planned" in the README.
 

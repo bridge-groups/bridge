@@ -1,20 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { registerSecret } from './core/redact.ts';
+import { secretEnvName, type SecretResolver } from './core/secrets.ts';
 
 /** Keychain service name for every secret the bridge stores. */
 const SERVICE = 'dev.bridge';
 /** `security` exits with this when the item does not exist. */
 const NOT_FOUND = 44;
 
-/** Resolve `secret:<name>` (OS keychain, falling back to BRIDGE_SECRET_<NAME>), `env:<NAME>`, or a literal. */
-export function resolveSecret(ref: string): string {
-  const value = lookup(ref);
-  // Anything that came from a secret store or the environment is kept out of the audit trail.
-  if (value !== ref) registerSecret(value);
-  return value;
-}
-
-function lookup(ref: string): string {
+/** The CLI's secrets: `secret:<name>` from the OS keychain (or BRIDGE_SECRET_<NAME>), `env:<NAME>`, or a literal. */
+export const keychainSecrets: SecretResolver = (ref) => {
   if (ref.startsWith('env:')) {
     const name = ref.slice(4);
     const v = process.env[name];
@@ -28,21 +21,7 @@ function lookup(ref: string): string {
     return v;
   }
   return ref;
-}
-
-/** A value that is a secret ref ("secret:x" / "env:X"), or a string with ${secret:x} / ${env:X} inside. */
-export function resolveTemplate(value: string): string {
-  if (/\$\{(secret|env):[^}]+\}/.test(value)) {
-    return value.replace(/\$\{((?:secret|env):[^}]+)\}/g, (_, ref: string) => resolveSecret(ref));
-  }
-  return resolveSecret(value);
-}
-
-/** Every `env:` reference in a value (whole ref or ${env:X} inside a template). */
-export function envRefs(value: string): string[] {
-  if (value.startsWith('env:')) return [value.slice(4)];
-  return [...value.matchAll(/\$\{env:([^}]+)\}/g)].map((m) => m[1]!);
-}
+};
 
 export function setSecret(name: string, value: string) {
   if (process.platform !== 'darwin') {
@@ -93,6 +72,4 @@ export function keychainRead(name: string): string | undefined {
   }
 }
 
-function envName(name: string) {
-  return `BRIDGE_SECRET_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-}
+const envName = secretEnvName;

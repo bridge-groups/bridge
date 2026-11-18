@@ -5,10 +5,12 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { McpError, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { HttpToolServerConfig, ToolServerConfig } from '../config/schema.ts';
 import { parseDuration } from '../core/address.ts';
-import { resolveSecret, resolveTemplate } from '../secrets.ts';
+import { envSecrets, resolveTemplate, type SecretResolver } from '../core/secrets.ts';
 import { BridgeOAuthProvider, NeedsSignIn, type OAuthStorage } from './oauth.ts';
 
 export interface ToolHubOptions {
+  /** Resolves `secret:` / `env:` references in env and headers (default: the environment only). */
+  secrets?: SecretResolver;
   /** Needed for tool servers with `oauth`: where tokens live and the redirect URL they were issued for. */
   oauth?: { storage: OAuthStorage; redirectUrl: string };
 }
@@ -109,7 +111,7 @@ export class ToolHub {
     const existing = this.clients.get(server);
     if (existing) return existing;
     const cfg = this.mustConfig(server);
-    const p = 'url' in cfg ? connectHttp(server, cfg, this.opts) : connectStdio(server, cfg);
+    const p = 'url' in cfg ? connectHttp(server, cfg, this.opts) : connectStdio(server, cfg, this.opts.secrets ?? envSecrets());
     this.clients.set(server, p);
     // A failed connect is forgotten so the next call tries again — but only if it is still the current one.
     p.catch(() => {
@@ -158,9 +160,9 @@ function newClient() {
 }
 
 /** A local server as a child process. It gets a minimal environment plus its own `env`, never the bridge's secrets. */
-async function connectStdio(name: string, cfg: Extract<ToolServerConfig, { command: string }>): Promise<Client> {
+async function connectStdio(name: string, cfg: Extract<ToolServerConfig, { command: string }>, secrets: SecretResolver): Promise<Client> {
   const env = getDefaultEnvironment();
-  for (const [k, v] of Object.entries(cfg.env)) env[k] = resolveSecret(v);
+  for (const [k, v] of Object.entries(cfg.env)) env[k] = secrets(v);
   const transport = new StdioClientTransport({ command: cfg.command, args: cfg.args, env, stderr: 'pipe' });
   // Keep the end of stderr so a server that dies at startup can say why.
   let tail = '';
@@ -179,13 +181,14 @@ async function connectStdio(name: string, cfg: Extract<ToolServerConfig, { comma
 
 async function connectHttp(name: string, cfg: HttpToolServerConfig, opts: ToolHubOptions): Promise<Client> {
   const headers: Record<string, string> = {};
-  for (const [k, v] of Object.entries(cfg.headers)) headers[k] = resolveTemplate(v);
+  const secrets = opts.secrets ?? envSecrets();
+  for (const [k, v] of Object.entries(cfg.headers)) headers[k] = resolveTemplate(v, secrets);
   const url = new URL(cfg.url);
   let authProvider: BridgeOAuthProvider | undefined;
   if (cfg.oauth) {
     if (!opts.oauth) throw new Error(`${name}: OAuth tool servers need the bridge's OAuth storage`);
     if (!opts.oauth.storage.get(name).tokens) throw new NeedsSignIn(name);
-    authProvider = new BridgeOAuthProvider(name, cfg, opts.oauth.storage, opts.oauth.redirectUrl);
+    authProvider = new BridgeOAuthProvider(name, cfg, opts.oauth.storage, opts.oauth.redirectUrl, secrets);
   }
   const init = { requestInit: { headers }, authProvider };
   if (cfg.transport !== 'sse') {
@@ -194,6 +197,7 @@ async function connectHttp(name: string, cfg: HttpToolServerConfig, opts: ToolHu
       await client.connect(new StreamableHTTPClientTransport(url, init));
       return client;
     } catch (err) {
+      await client.close().catch(() => {});
       const e = describe(err, cfg.url);
       if (cfg.transport === 'streamable-http' || err instanceof NeedsSignIn || /unauthorized/.test(e.message)) throw e;
       // auto: older servers only speak SSE (GET /sse + POST /messages).
@@ -207,6 +211,8 @@ async function connectHttp(name: string, cfg: HttpToolServerConfig, opts: ToolHu
     await client.connect(new SSEClientTransport(url, { ...init, eventSourceInit }));
     return client;
   } catch (err) {
+    // A failed SSE connection keeps reconnecting in the background until its transport is closed.
+    await client.close().catch(() => {});
     throw describe(err, cfg.url);
   }
 }

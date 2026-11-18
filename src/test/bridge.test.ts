@@ -5,7 +5,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
-import { Store } from '../core/store.ts';
+import { localAgents } from '../adapters/agent/local.ts';
+import { SqliteStore } from '../core/store.ts';
 import type { AgentAdapter, AgentTurn } from '../adapters/agent/types.ts';
 import { FakeIm } from './helpers.ts';
 
@@ -48,8 +49,9 @@ const text = (r: any) => r.content.map((c: any) => c.text).join('');
 
 async function setup(agents: AgentAdapter[] = [], extraRoutes = '', extraPolicies = '') {
   const im = new FakeIm();
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   const bridge = new Bridge({
+    agentFactory: localAgents,
     cfg: parseConfig(yaml(extraRoutes, extraPolicies)),
     store,
     ims: [im],
@@ -216,14 +218,14 @@ test('webhook agent', async () => {
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   const port = (http.address() as any).port;
   const im = new FakeIm();
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   const cfg = parseConfig(`
 server: { port: 0 }
 im: { slack: { app_token: env:A, bot_token: env:B } }
 agents: { hook: { type: webhook, url: "http://127.0.0.1:${port}/" } }
 routes: [ { from: "slack:*", to: hook } ]
 `);
-  const bridge = new Bridge({ cfg, store, ims: [im], log: () => {} });
+  const bridge = new Bridge({ agentFactory: localAgents, cfg, store, ims: [im], log: () => {} });
   await bridge.start();
   try {
     im.receive({ userId: 'U5', text: 'ping' });
@@ -241,7 +243,7 @@ routes: [ { from: "slack:*", to: hook } ]
 test('approval buttons: wrong person is told privately, right person approves, message shows outcome', async () => {
   const boss = scripted('boss', async (mcp) => text(await mcp.callTool({ name: 'fake__delete_thing', arguments: { id: '9' } })));
   const im = new FakeIm().withButtons();
-  const bridge = new Bridge({ cfg: parseConfig(yaml()), store: new Store(':memory:'), ims: [im], agents: new Map([['boss', boss]]), log: () => {} });
+  const bridge = new Bridge({ agentFactory: localAgents, cfg: parseConfig(yaml()), store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['boss', boss]]), log: () => {} });
   await bridge.start();
   im.onSend((m) => {
     if (!m.text.startsWith('🔐')) return;
@@ -274,8 +276,9 @@ test('budget: each turn gets what is left, and an exhausted budget stops the tur
   const cc: AgentAdapter = { name: 'echo', async run(t) { seen.push(t.budgetUsd); return { text: 'ok', costUsd: costs[seen.length - 1] }; } };
   const im = new FakeIm();
   const bridge = new Bridge({
+    agentFactory: localAgents,
     cfg: parseConfig(yaml('', '  - { match: { agent: echo }, budget_usd: 1 }')),
-    store: new Store(':memory:'), ims: [im], agents: new Map([['echo', cc]]), log: () => {},
+    store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['echo', cc]]), log: () => {},
   });
   await bridge.start();
   try {
@@ -296,8 +299,9 @@ test('budget: a turn waits for enough budget to cover the cheapest recent turn, 
   const seen: (number | undefined)[] = [];
   const cc: AgentAdapter = { name: 'echo', async run(t) { seen.push(t.budgetUsd); return { text: 'ok', costUsd: 0.25 }; } };
   const im = new FakeIm();
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   const bridge = new Bridge({
+    agentFactory: localAgents,
     cfg: parseConfig(yaml('', '  - { match: { agent: echo }, budget_usd: 0.6 }')),
     store, ims: [im], agents: new Map([['echo', cc]]), log: () => {},
   });
@@ -331,7 +335,8 @@ test('attachments are downloaded per conversation and handed to the agent; overs
   const echo: AgentAdapter = { name: 'echo', async run(t) { seen.push(t); return { text: 'got it' }; } };
   const im = new FakeIm();
   const bridge = new Bridge({
-    cfg: parseConfig(yaml()), store: new Store(':memory:'), ims: [im], agents: new Map([['echo', echo]]), filesDir, log: () => {},
+    agentFactory: localAgents,
+    cfg: parseConfig(yaml()), store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['echo', echo]]), filesDir, log: () => {},
   });
   await bridge.start();
   try {
@@ -370,7 +375,7 @@ test('verbose progress lists the recent steps in the placeholder', async () => {
   };
   const im = new FakeIm();
   const cfg = parseConfig(yaml() + '\ndefaults: { progress: verbose }\n');
-  const bridge = new Bridge({ cfg, store: new Store(':memory:'), ims: [im], agents: new Map([['echo', echo]]), log: () => {} });
+  const bridge = new Bridge({ agentFactory: localAgents, cfg, store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['echo', echo]]), log: () => {} });
   await bridge.start();
   try {
     im.receive({ userId: 'U1', text: 'go' });

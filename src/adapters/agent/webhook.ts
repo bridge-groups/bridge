@@ -1,6 +1,6 @@
 import type { AgentConfig } from '../../config/schema.ts';
 import { parseDuration } from '../../core/address.ts';
-import { resolveSecret } from '../../secrets.ts';
+import type { SecretResolver } from '../../core/secrets.ts';
 import type { AgentAdapter, AgentReply, AgentTurn } from './types.ts';
 
 type WebhookConfig = Extract<AgentConfig, { type: 'webhook' }>;
@@ -14,14 +14,17 @@ export class WebhookAgent implements AgentAdapter {
   readonly name: string;
   private readonly cfg: WebhookConfig;
 
-  constructor(name: string, cfg: WebhookConfig) {
+  private readonly secrets: SecretResolver;
+
+  constructor(name: string, cfg: WebhookConfig, secrets: SecretResolver) {
     this.name = name;
     this.cfg = cfg;
+    this.secrets = secrets;
   }
 
   async run(turn: AgentTurn): Promise<AgentReply> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    for (const [k, v] of Object.entries(this.cfg.headers)) headers[k] = resolveSecret(v);
+    for (const [k, v] of Object.entries(this.cfg.headers)) headers[k] = this.secrets(v);
     const timeout = AbortSignal.timeout(parseDuration(this.cfg.timeout));
     const res = await fetch(this.cfg.url, {
       method: 'POST',

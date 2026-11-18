@@ -21,28 +21,30 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/("[\w-]*(?:secret|token|password|passwd|api[_-]?key)[\w-]*"\s*:\s*")(?:[^"\\]|\\.){8,}"/gi, '$1[redacted]"'],
 ];
 
-/** Exact credential values the bridge resolved (IM tokens, header and env secrets, OAuth tokens). */
-const knownSecrets = new Set<string>();
 
 /**
- * Redact this exact value from everything written to the trace from now on. Call it for every credential
- * the process resolves; values shorter than 8 characters are ignored (they would redact ordinary words).
+ * Keeps credentials out of the audit trail: the exact values one bridge resolved (IM tokens, header and env
+ * secrets, OAuth tokens), plus well-known token shapes. One per bridge, so bridges in one process share nothing.
  */
-export function registerSecret(value: string): void {
-  if (value.length >= 8) knownSecrets.add(value);
-}
+export class Redactor {
+  private readonly known = new Set<string>();
 
-/** The audit log keeps everything except credentials. */
-export function redact(s: string): string {
-  // Longest first, so a secret that contains another is removed whole.
-  let out = s;
-  for (const secret of [...knownSecrets].sort((a, b) => b.length - a.length)) {
-    out = out.split(secret).join('[redacted]');
-    // The trace stores JSON, where a secret with quotes, backslashes or control characters appears escaped.
-    const escaped = JSON.stringify(secret).slice(1, -1);
-    if (escaped !== secret) out = out.split(escaped).join('[redacted]');
+  /** Redact this exact value from now on; values shorter than 8 characters are ignored (they would hit ordinary words). */
+  add(value: string): void {
+    if (value.length >= 8) this.known.add(value);
   }
-  return SECRET_PATTERNS.reduce((acc, [re, to]) => acc.replace(re, to), out);
+
+  redact(s: string): string {
+    // Longest first, so a secret that contains another is removed whole.
+    let out = s;
+    for (const secret of [...this.known].sort((a, b) => b.length - a.length)) {
+      out = out.split(secret).join('[redacted]');
+      // The trace stores JSON, where a secret with quotes, backslashes or control characters appears escaped.
+      const escaped = JSON.stringify(secret).slice(1, -1);
+      if (escaped !== secret) out = out.split(escaped).join('[redacted]');
+    }
+    return SECRET_PATTERNS.reduce((acc, [re, to]) => acc.replace(re, to), out);
+  }
 }
 
 /** Whether a config value is itself a credential (a known token format), rather than a reference to one. */

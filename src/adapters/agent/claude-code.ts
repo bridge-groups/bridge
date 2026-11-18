@@ -7,7 +7,8 @@ import { createInterface } from 'node:readline';
 import type { AgentConfig } from '../../config/schema.ts';
 import type { AgentAdapter, AgentReply, AgentTurn, Workspace } from './types.ts';
 import { terminateTree } from './process-tree.ts';
-import { resolveSecret } from '../../secrets.ts';
+import type { SecretResolver } from '../../core/secrets.ts';
+import { sessionSlug } from '../../core/address.ts';
 import {
   ensureWorktree,
   expandHome,
@@ -16,7 +17,6 @@ import {
   pruneIdle,
   pushPullRequest,
   removeWorktree,
-  sessionSlug,
   squashMerge,
   worktreeStatus,
   type WorktreeOpts,
@@ -78,11 +78,14 @@ export class ClaudeCodeAgent implements AgentAdapter {
   private readonly busy = new Map<string, number>();
   readonly workspace?: Workspace;
 
-  constructor(name: string, cfg: ClaudeCodeConfig) {
+  constructor(name: string, cfg: ClaudeCodeConfig, secrets: SecretResolver) {
     this.name = name;
     this.cfg = cfg;
     if (cfg.worktree) {
-      this.workspace = new WorktreeWorkspace(this.worktreeOpts.bind(this), cfg.git_token, (key, fn) => this.locks.run(sessionSlug(key), fn), async (slug, fn) =>
+      // The token is resolved when a PR is pushed, so a secret stored later is picked up.
+      const gitToken = cfg.git_token;
+      const token = gitToken === undefined ? undefined : () => secrets(gitToken);
+      this.workspace = new WorktreeWorkspace(this.worktreeOpts.bind(this), token, (key, fn) => this.locks.run(sessionSlug(key), fn), async (slug, fn) =>
         this.locks.run(slug, async () => {
           if (!this.busy.get(slug)) await fn();
         }),
@@ -247,7 +250,7 @@ class WorktreeWorkspace implements Workspace {
 
   constructor(
     opts: (sessionKey: string) => WorktreeOpts,
-    gitToken: string | undefined,
+    gitToken: (() => string) | undefined,
     locked: <T>(sessionKey: string, fn: () => Promise<T>) => Promise<T>,
     pruneGuard: (slug: string, fn: () => Promise<void>) => Promise<void>,
   ) {
@@ -269,7 +272,7 @@ class WorktreeWorkspace implements Workspace {
         });
       this.pr = (key) =>
         this.locked(key, async () => {
-          const { url, created } = await pushPullRequest(this.opts(key), resolveSecret(gitToken));
+          const { url, created } = await pushPullRequest(this.opts(key), gitToken());
           return created ? `🔀 Opened ${url}` : `🔀 Pushed new commits to the open PR ${url}`;
         });
     }

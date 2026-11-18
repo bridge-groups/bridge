@@ -1,6 +1,9 @@
 # bridge
 
-One local process that connects **agents ↔ IM**, **agents ↔ agents** and **agents ↔ tools**, driven by a single `bridge.yaml`.
+Connects **agents ↔ IM**, **agents ↔ agents** and **agents ↔ tools**. Two ways to run it:
+
+- **The `bridge` command** on your own machine: one process driven by a single `bridge.yaml`, secrets in the OS keychain, a local dashboard. Most of this README is about it.
+- **The library**, `@bridge-groups/bridge`, embedded in an app or service that keeps users' configuration and secrets itself, with one bridge per user if it serves several. See [doc/library.md](doc/library.md).
 
 - **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound so you need no public URL. Telegram (long polling) is written but not yet tested against the real service.
 - **Agents**: Claude Code (headless `claude -p`), any HTTP webhook, or any local process speaking JSON lines.
@@ -162,18 +165,23 @@ Both kinds get the MCP URL, so any agent with an MCP client can use `send_messag
 
 ```
 src/
+  index.ts               the library's entry point (@bridge-groups/bridge)
+  local.ts               opt-in local agents (@bridge-groups/bridge/local)
   cli.ts                 commands
+  secrets.ts             the CLI's keychain secrets; keychain-oauth.ts keeps OAuth tokens there
   config/                schema (zod), checks with line numbers, tests, change review (what widens access)
   core/router.ts         first-match routing, explain, outbound grants
   core/policy.ts         approvals, max hops, budgets
   core/bridge.ts         inbound → queue → agent turn → reply; MCP tool backend
-  core/store.ts          SQLite: sessions, queue, trace (redacted)
-  mcp/hub.ts             per-turn MCP endpoints over streamable HTTP
+  core/store.ts          BridgeStore interface; SqliteStore: sessions, queue, trace
+  core/secrets.ts        SecretResolver: how the embedding app hands the bridge its secrets
+  core/redact.ts         Redactor: keeps credentials out of the trace, one per bridge
+  mcp/hub.ts             per-turn MCP endpoints over streamable HTTP (mounted wherever the app serves the bridge)
   mcp/tools.ts           external MCP tool servers (stdio or HTTP)
-  mcp/oauth.ts           OAuth sign-in for remote tool servers (keychain storage, browser flow)
-  web/                   local dashboard: JSON API + one self-contained page
+  mcp/oauth.ts           OAuth sign-in for remote tool servers (browser flow)
+  web/                   the CLI's local dashboard: JSON API + one self-contained page
   adapters/im/           slack, feishu / lark, telegram, local console
-  adapters/agent/        claude-code, webhook, stdio
+  adapters/agent/        webhook (remote); claude-code and stdio (local, opt-in)
   examples/              example agents
   test/                  tests, helpers, fixtures
 doc/                     documentation and reference files
@@ -186,8 +194,9 @@ Contributing: see [AGENTS.md](AGENTS.md).
 - Discord adapter; Telegram tested end to end
 - Codex wrapper, A2A, webhook SSE streaming
 - Strict policy on `tainted` envelopes (today the flag only keeps `initiator` from approving)
+- A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP events, per-user isolation and limits, agents that run user code in sandboxes
 
 ## Not planned
 
 - Config-editing commands (`add`, `link`, `allow`, `grant`): you or a coding agent edit `bridge.yaml` directly.
-- A cloud relay or hosted service, and bridges on several machines sharing one bot: bridge runs on your own machine.
+- A cloud relay, and bridges on several machines sharing one bot: the `bridge` command runs on your own machine.

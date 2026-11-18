@@ -1,15 +1,15 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { BridgeConfig, TrustLevel } from '../config/schema.ts';
-import { createAgent } from '../adapters/agent/index.ts';
+import { remoteAgents, type AgentFactory } from '../adapters/agent/index.ts';
 import type { AgentAdapter, AgentReply, Workspace } from '../adapters/agent/types.ts';
 import type { Choice, ImAdapter, InboundAction } from '../adapters/im/types.ts';
 import { randomUUID } from 'node:crypto';
 import { McpHub, type HubBackend, type SessionGrant, type ToolResult } from '../mcp/hub.ts';
 import { ToolHub } from '../mcp/tools.ts';
-import { keychainStorage, OAuthFlows, type OAuthStorage } from '../mcp/oauth.ts';
-import { handleWeb, localBaseUrl, type WebBackend, type WebChoice, type WebSession, type WebTool } from '../web/api.ts';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { parseDuration } from './address.ts';
+import { memoryStorage, OAuthFlows, watchTokens, type OAuthStorage } from '../mcp/oauth.ts';
+import type { WebBackend, WebChoice, WebSession, WebTool } from '../web/api.ts';
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
+import { localBaseUrl, parseDuration, sessionSlug } from './address.ts';
 import { minTrust, newEnvelope, type ContentBlock, type Envelope } from './envelope.ts';
 import { PolicyEngine } from './policy.ts';
 import { Router, type InboundFile, type InboundMessage } from './router.ts';
@@ -17,8 +17,9 @@ import { existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, statSync, writeF
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
-import { sessionSlug } from '../adapters/agent/worktree.ts';
-import type { Store } from './store.ts';
+import type { BridgeStore } from './store.ts';
+import { Redactor } from './redact.ts';
+import { envSecrets, type SecretResolver } from './secrets.ts';
 import { describeChanges } from '../config/changes.ts';
 import type { ConfigGate, PendingConfig } from '../config/gate.ts';
 
@@ -65,13 +66,36 @@ interface Waiter {
 
 export interface BridgeOptions {
   cfg: BridgeConfig;
-  store: Store;
+  store: BridgeStore;
   ims: ImAdapter[];
-  /** Pre-built agents (tests); anything missing is built from cfg.agents. */
+  /** Resolves `secret:` / `env:` references in the config (default: the environment only). */
+  secrets?: SecretResolver;
+  /**
+   * Keeps credentials out of the audit trail. Pass one to add values resolved outside the bridge (the IM
+   * tokens the app built its adapters with); every secret the bridge resolves itself is added too.
+   */
+  redactor?: Redactor;
+  /**
+   * Builds agents from cfg.agents (default: remote ones only). Pass `localAgents` from the `/local` entry point
+   * to run claude-code and stdio agents on this machine.
+   */
+  agentFactory?: AgentFactory;
+  /** Pre-built agents (tests, or agents the app implements itself); the rest are built from cfg.agents. */
   agents?: Map<string, AgentAdapter>;
   tools?: ToolHub;
-  /** OAuth tokens for tool servers (default: the OS keychain). */
+  /** OAuth tokens for tool servers (default: in memory, so sign-ins last until the process ends). */
   oauthStorage?: OAuthStorage;
+  /**
+   * Where agents reach this bridge's MCP endpoints and the OAuth callback, when the app serves `handle` on its
+   * own HTTP server (e.g. "https://app.example.com/bridge/u123"). Without it the bridge listens on
+   * cfg.server.host:port itself.
+   */
+  mcpBaseUrl?: string;
+  /**
+   * More routes on the server the bridge listens on itself (no mcpBaseUrl): the CLI's dashboard. Return false
+   * to answer 404.
+   */
+  extraRoutes?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
   /** Where attachments are downloaded (default: a temp dir). */
   filesDir?: string;
   log?: (line: string) => void;
@@ -103,7 +127,7 @@ export class Bridge implements HubBackend, WebBackend {
   private cfg: BridgeConfig;
   private router: Router;
   private policies: PolicyEngine;
-  private readonly store: Store;
+  private readonly store: BridgeStore;
   private readonly ims = new Map<string, ImAdapter>();
   private readonly agents = new Map<string, AgentAdapter>();
   private readonly injectedAgents: Set<string>;
@@ -140,6 +164,18 @@ export class Bridge implements HubBackend, WebBackend {
     }
   >();
   private configGate?: ConfigGate;
+  private readonly redactor: Redactor;
+  private readonly secrets: SecretResolver;
+  private readonly agentFactory: AgentFactory;
+  private readonly mcpBaseUrl?: string;
+  /** Path prefix of mcpBaseUrl, stripped from requests before routing. */
+  private readonly mountPath: string;
+  private readonly extraRoutes?: BridgeOptions['extraRoutes'];
+  private http?: HttpServer;
+  /** Set once the bridge listens itself (the real port when cfg.server.port is 0). */
+  private listenUrl?: string;
+  /** Writes nobody waits for (the audit trail, a session id reported mid-turn), applied in order. */
+  private writes: Promise<void> = Promise.resolve();
   /** Dashboard branch status per session key (see BRANCH_CACHE_MS). */
   private readonly branchCache = new Map<string, { at: number; branch?: string; canMerge: boolean }>();
   readonly oauth: OAuthFlows;
@@ -154,29 +190,46 @@ export class Bridge implements HubBackend, WebBackend {
 
   constructor(opts: BridgeOptions) {
     this.cfg = opts.cfg;
+    this.redactor = opts.redactor ?? new Redactor();
+    const resolve = opts.secrets ?? envSecrets();
+    // Every credential the bridge resolves is kept out of its audit trail.
+    this.secrets = (ref) => {
+      const value = resolve(ref);
+      if (value !== ref) this.redactor.add(value);
+      return value;
+    };
+    this.agentFactory = opts.agentFactory ?? remoteAgents;
+    this.mcpBaseUrl = opts.mcpBaseUrl?.replace(/\/+$/, '');
+    this.mountPath = this.mcpBaseUrl ? new URL(this.mcpBaseUrl).pathname.replace(/\/+$/, '') : '';
+    this.extraRoutes = opts.extraRoutes;
     this.router = new Router(opts.cfg);
     this.policies = new PolicyEngine(opts.cfg);
     this.store = opts.store;
     for (const im of opts.ims) this.ims.set(im.platform, im);
     for (const [k, v] of opts.agents ?? []) this.agents.set(k, v);
     this.injectedAgents = new Set(opts.agents?.keys() ?? []);
-    const oauthStorage = opts.oauthStorage ?? keychainStorage();
-    const redirectUrl = `${localBaseUrl(opts.cfg.server)}/oauth/callback`;
-    this.tools = opts.tools ?? new ToolHub(opts.cfg.tools, { oauth: { storage: oauthStorage, redirectUrl } });
-    this.oauth = new OAuthFlows(() => this.cfg.tools, oauthStorage, redirectUrl, (server) => {
-      this.store.trace('-', 'oauth', 'web', { server, signedIn: this.oauth.status(server) === 'signed-in' });
+    const oauthStorage = watchTokens(opts.oauthStorage ?? memoryStorage(), (t) => this.redactor.add(t));
+    const redirectUrl = `${this.baseUrl()}/oauth/callback`;
+    this.tools = opts.tools ?? new ToolHub(opts.cfg.tools, { secrets: this.secrets, oauth: { storage: oauthStorage, redirectUrl } });
+    this.oauth = new OAuthFlows(() => this.cfg.tools, oauthStorage, redirectUrl, this.secrets, (server) => {
+      this.trace('-', 'oauth', 'web', { server, signedIn: this.oauth.status(server) === 'signed-in' });
       this.tools.reset(server).catch((err) => this.log(`tool server ${server} not reset: ${(err as Error).message}`));
     });
-    this.hub = new McpHub(this);
+    this.hub = new McpHub(this, () => this.baseUrl());
     this.log = opts.log ?? ((l) => console.log(l));
     this.filesDir = opts.filesDir ?? join(tmpdir(), 'bridge-files');
   }
 
+  /**
+   * Connect the IMs and start routing. Without mcpBaseUrl the bridge also starts its own HTTP server on
+   * cfg.server; with it, the app serves `handle` and nothing listens here. Returns where agents reach the bridge.
+   */
   async start(): Promise<{ mcpUrl: string }> {
-    const mcpUrl = await this.hub.listen(this.cfg.server.host, this.cfg.server.port);
+    if (!this.mcpBaseUrl) await this.listen();
+    const mcpUrl = this.baseUrl();
     // Work left over from the last run takes its place in the queues before any new message can;
     // it runs once the IMs are connected (see `ready`).
-    this.replayQueue();
+    await this.replayQueue();
     for (const im of this.ims.values()) {
       await im.start(
         (msg) => this.track(this.handleInbound(msg).catch((e) => this.log(`inbound error: ${e?.stack ?? e}`))),
@@ -208,7 +261,8 @@ export class Bridge implements HubBackend, WebBackend {
     await this.idle();
     for (const im of this.ims.values()) await im.stop().catch(() => {});
     await this.tools.stop();
-    await this.hub.close();
+    await new Promise<void>((resolve) => (this.http ? this.http.close(() => resolve()) : resolve()));
+    await this.flushWrites();
   }
 
   /**
@@ -248,6 +302,7 @@ export class Bridge implements HubBackend, WebBackend {
     while (this.chains.size || this.inflight.size) {
       await Promise.allSettled([...this.inflight, ...this.chains.values()]);
     }
+    await this.flushWrites();
   }
 
   private track(p: Promise<unknown>) {
@@ -272,15 +327,15 @@ export class Bridge implements HubBackend, WebBackend {
       return;
     }
 
-    let session = this.store.getSession(key);
+    let session = await this.store.getSession(key);
     if (session && msg.isDM && Date.now() - session.last_active > parseDuration(this.cfg.defaults.dm_idle_reset)) {
-      this.store.deleteSession(key);
+      await this.store.deleteSession(key);
       session = undefined;
     }
 
     const match = this.router.matchInbound(msg, { personId: person?.id, threadAgent: session?.agent });
     if (!match) {
-      this.store.trace(key, 'ignored', person?.id ?? `${msg.platform}:${msg.userId}`, { text: msg.text });
+      this.trace(key, 'ignored', person?.id ?? `${msg.platform}:${msg.userId}`, { text: msg.text });
       if (!person && (msg.isDM || msg.mentioned)) {
         this.log(`ignored ${msg.platform} user ${msg.userId} — not in people: (add  ${msg.platform}: ${msg.userId}  to a person)`);
       }
@@ -288,7 +343,7 @@ export class Bridge implements HubBackend, WebBackend {
     }
 
     if (/^\/?(reset|new)$/i.test(match.text.trim())) {
-      this.store.deleteSession(key);
+      await this.store.deleteSession(key);
       await this.send(thread, `🔄 Started a fresh ${match.agent} session.`);
       return;
     }
@@ -296,14 +351,14 @@ export class Bridge implements HubBackend, WebBackend {
     const command = COMMANDS.get(match.text.trim().toLowerCase());
     const workspace = command ? this.agent(match.agent).workspace : undefined;
     if (command && workspace) {
-      this.store.trace(key, 'command', senderId, { command });
+      this.trace(key, 'command', senderId, { command });
       this.schedule(key, () => this.runCommand(command, workspace, key, thread, senderId));
       return;
     }
 
     const trust: TrustLevel = person?.trust ?? 'external';
     const budgetUsd = this.policies.budgetUsd(match.agent);
-    this.store.trace(key, 'inbound', senderId, { route: match.index, agent: match.agent, text: match.text });
+    this.trace(key, 'inbound', senderId, { route: match.index, agent: match.agent, text: match.text });
     // The message takes its place in the thread's queue now; attachments download when its turn comes, so a
     // big file never lets a later message overtake it.
     this.schedule(key, async () => {
@@ -318,7 +373,7 @@ export class Bridge implements HubBackend, WebBackend {
         tainted: trust === 'external',
       });
       const job: Job = { sessionKey: key, agent: match.agent, text: match.text, envelope, thread };
-      this.store.enqueue(envelope.id, key, job);
+      await this.store.enqueue(envelope.id, key, job);
       await this.runJob(job);
     });
   }
@@ -351,23 +406,23 @@ export class Bridge implements HubBackend, WebBackend {
         if (!preview.ok) return void (await this.send(thread, `⚠️ ${preview.reason}`));
         if (!(await confirm(preview.summary, { label: 'Open PR', value: 'pr', style: 'primary' }))) return;
         const result = await ws.pr(key);
-        this.store.trace(key, 'pr', who, { result });
+        this.trace(key, 'pr', who, { result });
         await this.send(thread, result);
       } else if (command === 'merge') {
         const preview = await ws.previewMerge(key);
         if (!preview.ok) return void (await this.send(thread, `⚠️ ${preview.reason}`));
         if (!(await confirm(preview.summary, { label: 'Merge', value: 'merge', style: 'primary' }))) return;
         const result = await ws.merge(key);
-        this.store.deleteSession(key);
-        this.store.trace(key, 'merged', who, { result });
+        await this.store.deleteSession(key);
+        this.trace(key, 'merged', who, { result });
         await this.send(thread, result);
       } else {
         const lost = await ws.previewDiscard(key);
         if (lost === undefined) return void (await this.send(thread, 'This conversation has no branch to discard.'));
         if (lost && !(await confirm(`🗑 This throws away ${lost}`, { label: 'Discard', value: 'discard', style: 'danger' }))) return;
         const result = await ws.discard(key);
-        this.store.deleteSession(key);
-        this.store.trace(key, 'discarded', who, {});
+        await this.store.deleteSession(key);
+        this.trace(key, 'discarded', who, {});
         await this.send(thread, result);
       }
     } catch (err) {
@@ -392,9 +447,9 @@ export class Bridge implements HubBackend, WebBackend {
     this.chains.set(key, next);
   }
 
-  private replayQueue() {
+  private async replayQueue() {
     const ttl = parseDuration(this.cfg.defaults.offline_queue_ttl);
-    for (const row of this.store.takePending(ttl)) {
+    for (const row of await this.store.takePending(ttl)) {
       const job = JSON.parse(row.payload) as Job;
       if (row.status === 'pending') {
         this.log(`running queued message ${row.id} for ${job.agent}`);
@@ -405,11 +460,11 @@ export class Bridge implements HubBackend, WebBackend {
       const resumed: Job = { ...job, interrupted };
       // Count this interruption before anything else can fail, so a turn that crashes the bridge on resume
       // is still given up after MAX_RESUMES.
-      this.store.markRunning(row.id, resumed);
+      await this.store.markRunning(row.id, resumed);
       this.log(`resuming interrupted turn ${row.id} for ${job.agent} (attempt ${interrupted})`);
       this.schedule(job.sessionKey, async () => {
         if (interrupted > MAX_RESUMES) {
-          this.store.finish(row.id, 'failed');
+          await this.store.finish(row.id, 'failed');
           await this.notify(job.thread, `⚠️ ${job.agent}'s turn was interrupted ${interrupted} times by bridge restarts, so I stopped retrying. Send the request again to restart it.`);
           return;
         }
@@ -424,12 +479,12 @@ export class Bridge implements HubBackend, WebBackend {
     const { sessionKey, agent, thread } = job;
     // Shutting down: leave it queued (pending or running), the next start picks it up.
     if (this.stopping) return;
-    this.store.markRunning(job.envelope.id, job);
-    let session = this.store.getSession(sessionKey);
+    await this.store.markRunning(job.envelope.id, job);
+    let session = await this.store.getSession(sessionKey);
     if (session && session.agent !== agent) {
-      this.store.updateSession(sessionKey, { agent_session_id: null });
+      await this.store.updateSession(sessionKey, { agent_session_id: null });
     }
-    session = this.store.upsertSession({
+    session = await this.store.upsertSession({
       key: sessionKey,
       agent,
       agent_session_id: session?.agent === agent ? session.agent_session_id : null,
@@ -464,7 +519,7 @@ export class Bridge implements HubBackend, WebBackend {
     };
     const onProgress = (line: string) => {
       if (finished) return;
-      this.store.trace(sessionKey, 'progress', agent, { line });
+      this.trace(sessionKey, 'progress', agent, { line });
       steps.push(line);
       if (!placeholder || !edit || pending) return;
       const wait = 1500 - (Date.now() - lastEdit);
@@ -500,15 +555,15 @@ export class Bridge implements HubBackend, WebBackend {
 
     if (outcome.ok) {
       await this.post(thread, outcome.text, placeholder).catch((err) => this.log(`reply to ${sessionKey} not delivered: ${(err as Error).message}`));
-      this.store.finish(job.envelope.id, 'done');
+      await this.store.finish(job.envelope.id, 'done');
     } else if (this.stopping) {
       // Cut off by shutdown: the queue row stays `running`, so the next start resumes the turn.
-      this.store.trace(sessionKey, 'interrupted', agent, { message: outcome.message });
+      this.trace(sessionKey, 'interrupted', agent, { message: outcome.message });
       await this.post(thread, `⏸ ${agent}'s turn was interrupted by a bridge shutdown — it resumes when the bridge is back.`, placeholder).catch(() => {});
     } else {
-      this.store.trace(sessionKey, 'error', agent, { message: outcome.message });
+      this.trace(sessionKey, 'error', agent, { message: outcome.message });
       await this.post(thread, `⚠️ ${agent} failed: ${outcome.message}`, placeholder).catch((err) => this.log(`error report to ${sessionKey} not delivered: ${(err as Error).message}`));
-      this.store.finish(job.envelope.id, 'failed');
+      await this.store.finish(job.envelope.id, 'failed');
     }
   }
 
@@ -521,10 +576,10 @@ export class Bridge implements HubBackend, WebBackend {
   ): Promise<AgentReply> {
     const adapter = this.agent(turn.agent);
     const ctx: TurnCtx = { ...turn, controller: new AbortController() };
-    const budgetUsd = this.remainingBudget(ctx);
-    const refusal = this.budgetRefusal(ctx, budgetUsd);
+    const budgetUsd = await this.remainingBudget(ctx);
+    const refusal = await this.budgetRefusal(ctx, budgetUsd);
     if (refusal) {
-      this.store.trace(ctx.sessionKey, 'budget', ctx.agent, refusal.detail);
+      this.trace(ctx.sessionKey, 'budget', ctx.agent, refusal.detail);
       throw refusal;
     }
     if (opts.parent?.aborted) throw new Error('the delegating turn has ended');
@@ -546,12 +601,12 @@ export class Bridge implements HubBackend, WebBackend {
         ),
         mcp: { url: grant.url, token: grant.token },
         onProgress: opts.onProgress,
-        onSessionId: (id) => this.store.updateSession(ctx.sessionKey, { agent_session_id: id }),
+        onSessionId: (id) => this.later(() => this.store.updateSession(ctx.sessionKey, { agent_session_id: id })),
         onNotice: (note) => void this.notify(ctx.thread, note),
       });
-      this.store.updateSession(ctx.sessionKey, { agent_session_id: reply.agentSessionId ?? null });
-      if (reply.costUsd) this.store.updateSession(ctx.rootKey, { addSpentUsd: reply.costUsd });
-      this.store.trace(ctx.sessionKey, 'reply', ctx.agent, { text: reply.text, costUsd: reply.costUsd });
+      await this.store.updateSession(ctx.sessionKey, { agent_session_id: reply.agentSessionId ?? null });
+      if (reply.costUsd) await this.store.updateSession(ctx.rootKey, { addSpentUsd: reply.costUsd });
+      this.trace(ctx.sessionKey, 'reply', ctx.agent, { text: reply.text, costUsd: reply.costUsd });
       return reply;
     } finally {
       grant.revoke();
@@ -613,7 +668,7 @@ export class Bridge implements HubBackend, WebBackend {
     await step('expiring attachments', () => this.expireFiles(parseDuration(defaults.files_ttl)));
     if (defaults.worktree_prune_after !== 'off') {
       const since = Date.now() - parseDuration(defaults.worktree_prune_after);
-      const recent = new Set(this.store.sessionsActiveSince(since).map(sessionSlug));
+      const recent = new Set((await this.store.sessionsActiveSince(since)).map(sessionSlug));
       const isIdle = (slug: string) => !recent.has(slug);
       for (const name of Object.keys(this.cfg.agents)) {
         await step(`worktree prune for ${name}`, async () => {
@@ -623,9 +678,9 @@ export class Bridge implements HubBackend, WebBackend {
         });
       }
     }
-    await step('pruning history', () => {
+    await step('pruning history', async () => {
       const now = Date.now();
-      const removed = this.store.prune({
+      const removed = await this.store.prune({
         queueBefore: now - parseDuration(defaults.offline_queue_ttl),
         historyBefore: defaults.retention === 'off' ? undefined : now - parseDuration(defaults.retention),
       });
@@ -658,9 +713,9 @@ export class Bridge implements HubBackend, WebBackend {
   }
 
   /** What's left of the conversation budget (shared by every agent in a delegation chain). */
-  private remainingBudget(ctx: TurnCtx): number | undefined {
+  private async remainingBudget(ctx: TurnCtx): Promise<number | undefined> {
     if (ctx.envelope.budgetUsd === undefined) return undefined;
-    const spent = this.store.getSession(ctx.rootKey)?.spent_usd ?? 0;
+    const spent = (await this.store.getSession(ctx.rootKey))?.spent_usd ?? 0;
     return Math.max(0, ctx.envelope.budgetUsd - spent);
   }
 
@@ -669,7 +724,7 @@ export class Bridge implements HubBackend, WebBackend {
    * checked between model requests, so a turn started with less than one request costs overshoots the budget;
    * a turn starts only when at least the agent's cheapest recent turn is left.
    */
-  private budgetRefusal(ctx: TurnCtx, left: number | undefined): BudgetRefusal | undefined {
+  private async budgetRefusal(ctx: TurnCtx, left: number | undefined): Promise<BudgetRefusal | undefined> {
     const budget = ctx.envelope.budgetUsd;
     if (budget === undefined || left === undefined) return undefined;
     const reset = 'Send "reset" to start a new conversation with a fresh budget.';
@@ -679,7 +734,8 @@ export class Bridge implements HubBackend, WebBackend {
         leftUsd: 0,
       });
     }
-    const floor = this.store.cheapestRecentTurn(ctx.agent);
+    await this.flushWrites(); // the replies of earlier turns are in the audit trail
+    const floor = await this.store.cheapestRecentTurn(ctx.agent);
     if (floor !== undefined && left < floor) {
       return new BudgetRefusal(
         `${ctx.agent} needs more than the $${left.toFixed(2)} left of this conversation's $${budget} budget (its cheapest recent turn cost $${floor.toFixed(2)}). ${reset}`,
@@ -687,6 +743,71 @@ export class Bridge implements HubBackend, WebBackend {
       );
     }
     return undefined;
+  }
+
+  // ───────────────────────── state writes ─────────────────────────
+
+  /** Append to the audit trail, cleared of every credential this bridge resolved. Not awaited; kept in order. */
+  private trace(sessionKey: string, kind: string, actor: string, detail: unknown) {
+    const json = this.redactor.redact(JSON.stringify(detail ?? null));
+    this.later(() => this.store.trace(sessionKey, kind, actor, json));
+  }
+
+  /** Queue a write nobody waits for; writes run one after another, in the order they were queued. */
+  private later(write: () => unknown) {
+    this.writes = this.writes.then(write).then(
+      () => undefined,
+      (err) => this.log(`state write failed: ${(err as Error)?.message ?? err}`),
+    );
+  }
+
+  /** Wait until every queued write has landed (before reading what they wrote). */
+  private flushWrites(): Promise<void> {
+    return this.writes;
+  }
+
+  /** The URL agents and OAuth providers reach this bridge at. */
+  private baseUrl(): string {
+    return this.mcpBaseUrl ?? this.listenUrl ?? localBaseUrl(this.cfg.server);
+  }
+
+  // ───────────────────────── HTTP ─────────────────────────
+
+  /**
+   * Serve the bridge's routes: each turn's MCP endpoint (`/mcp/<token>`) and the OAuth callback
+   * (`/oauth/callback`), relative to mcpBaseUrl. Resolves false for any other path, so an app can mount it in
+   * front of its own routes. Sign-ins start with `bridge.oauth.start(server)`, behind the app's own auth.
+   */
+  readonly handle = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
+    const url = new URL(req.url ?? '/', 'http://x');
+    if (this.mountPath && url.pathname !== this.mountPath && !url.pathname.startsWith(`${this.mountPath}/`)) return false;
+    const path = url.pathname.slice(this.mountPath.length) || '/';
+    if (await this.hub.handle(req, res, path)) return true;
+    if (path === '/oauth/callback') return this.oauth.handle(req, res, new URL(path + url.search, url));
+    return false;
+  };
+
+  private async listen() {
+    const { host, port } = this.cfg.server;
+    this.http = createServer((req, res) => {
+      const route = async () => {
+        if (await this.handle(req, res)) return;
+        const url = new URL(req.url ?? '/', 'http://x');
+        if (this.extraRoutes && (await this.extraRoutes(req, res, url))) return;
+        res.writeHead(404).end();
+      };
+      route().catch((err) => {
+        if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: String((err as Error)?.message ?? err) }));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.http!.once('error', reject);
+      this.http!.listen(port, host, () => resolve());
+    });
+    const addr = this.http.address();
+    const actual = typeof addr === 'object' && addr ? addr.port : port;
+    this.listenUrl = localBaseUrl({ host, port: actual });
   }
 
   // ───────────────────────── MCP backend ─────────────────────────
@@ -750,7 +871,7 @@ export class Bridge implements HubBackend, WebBackend {
   async callTool(grant: SessionGrant, name: string, args: Record<string, unknown>): Promise<ToolResult> {
     const ctx = this.active.get(grant);
     if (!ctx || ctx.controller.signal.aborted) return { text: 'this turn has ended', isError: true };
-    this.store.trace(ctx.sessionKey, 'tool_call', ctx.agent, { name, args });
+    this.trace(ctx.sessionKey, 'tool_call', ctx.agent, { name, args });
 
     switch (name) {
       case 'send_message': {
@@ -791,7 +912,7 @@ export class Bridge implements HubBackend, WebBackend {
     if (rule) {
       const approvers = this.approvers(rule.approvers, ctx.envelope);
       if (!approvers.length) {
-        this.store.trace(ctx.sessionKey, 'approval', 'nobody', { tool: qualified, approved: false });
+        this.trace(ctx.sessionKey, 'approval', 'nobody', { tool: qualified, approved: false });
         return { text: `${qualified} needs an approval, but no configured person may give it (add a person with trust: owner)`, isError: true };
       }
       const expires = rule.timeoutMs < 60e3 ? `${Math.round(rule.timeoutMs / 1e3)}s` : `${Math.round(rule.timeoutMs / 60e3)}m`;
@@ -818,13 +939,13 @@ export class Bridge implements HubBackend, WebBackend {
       // An approval that lands after the turn ended must not run the tool for nobody.
       if (ctx.controller.signal.aborted) return { text: 'this turn has ended', isError: true };
       const approved = decision?.value === 'approve';
-      this.store.trace(ctx.sessionKey, 'approval', decision?.by ?? 'timeout', { tool: qualified, approved });
+      this.trace(ctx.sessionKey, 'approval', decision?.by ?? 'timeout', { tool: qualified, approved });
       if (!approved) return { text: decision ? `denied by ${decision.by}` : 'approval timed out', isError: true };
     }
     const result = await this.tools.callTool(server, tool, args);
     const content = (result.content ?? []) as Array<{ type: string; text?: string }>;
     const text = content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('\n');
-    this.store.trace(ctx.sessionKey, 'tool_result', qualified, { text, isError: result.isError });
+    this.trace(ctx.sessionKey, 'tool_result', qualified, { text, isError: result.isError });
     return { text, isError: Boolean(result.isError) };
   }
 
@@ -864,8 +985,8 @@ export class Bridge implements HubBackend, WebBackend {
     }
     this.delegating.add(childKey);
     try {
-      const existing = this.store.getSession(childKey);
-      this.store.upsertSession({
+      const existing = await this.store.getSession(childKey);
+      await this.store.upsertSession({
         key: childKey,
         agent: target,
         agent_session_id: existing?.agent_session_id ?? null,
@@ -885,7 +1006,7 @@ export class Bridge implements HubBackend, WebBackend {
         tainted: ctx.envelope.tainted,
       });
       await this.notify(ctx.thread, `↪️ ${ctx.agent} → ${target}: ${task.length > 200 ? task.slice(0, 197) + '…' : task}`);
-      this.store.trace(childKey, 'delegate', ctx.agent, { target, task, hops });
+      this.trace(childKey, 'delegate', ctx.agent, { target, task, hops });
       const reply = await this.invoke(
         { sessionKey: childKey, rootKey: ctx.rootKey, agent: target, envelope, thread: ctx.thread },
         task,
@@ -898,27 +1019,23 @@ export class Bridge implements HubBackend, WebBackend {
     }
   }
 
-  status() {
+  async status() {
     return {
       startedAt: this.startedAt,
       ims: [...this.ims.keys()],
       agents: Object.keys(this.cfg.agents),
       tools: Object.keys(this.cfg.tools),
       activeTurns: [...this.active.values()].map((c) => ({ session: c.sessionKey, agent: c.agent })),
-      sessions: this.store.listSessions(20).map((s) => ({ key: s.key, agent: s.agent, lastActive: s.last_active, spentUsd: s.spent_usd })),
+      sessions: (await this.store.listSessions(20)).map((s) => ({ key: s.key, agent: s.agent, lastActive: s.last_active, spentUsd: s.spent_usd })),
     };
   }
 
   // ───────────────────────── dashboard ─────────────────────────
 
-  handleHttp(req: IncomingMessage, res: ServerResponse, url: URL) {
-    return handleWeb(this, req, res, url);
-  }
-
   async webSessions(): Promise<WebSession[]> {
     const busy = new Set([...this.active.values()].map((c) => c.rootKey));
     let lookups = 0;
-    return Promise.all(this.store.listSessions(200).map(async (s) => {
+    return Promise.all((await this.store.listSessions(200)).map(async (s) => {
       // Branch status runs git, so only the most recent conversations of agents with branches get it, and
       // it is cached briefly (turn ends, merges and discards refresh it).
       const ws = Object.hasOwn(this.cfg.agents, s.agent) ? this.agent(s.agent).workspace : undefined;
@@ -955,9 +1072,9 @@ export class Bridge implements HubBackend, WebBackend {
     return info;
   }
 
-  webTrace(sessionKey: string | undefined, limit: number) {
-    return this.store
-      .readTrace({ sessionKey, limit })
+  async webTrace(sessionKey: string | undefined, limit: number) {
+    await this.flushWrites();
+    return (await this.store.readTrace({ sessionKey, limit }))
       .reverse() // newest first
       .map((t) => ({ ts: t.ts, session: t.session_key, kind: t.kind, actor: t.actor, detail: t.detail }));
   }
@@ -999,7 +1116,7 @@ export class Bridge implements HubBackend, WebBackend {
    * Ask every owner, in their direct messages with the bot, to apply or reject a config change that widens
    * access. Whichever answer comes first (here, on the dashboard or from the CLI) settles it everywhere.
    */
-  askOwnersAboutConfig(pending: PendingConfig, signal: AbortSignal) {
+  async askOwnersAboutConfig(pending: PendingConfig, signal: AbortSignal) {
     const gate = this.configGate;
     if (!gate) return;
     const owners = Object.entries(this.cfg.people).filter(([, p]) => p.trust === 'owner');
@@ -1014,7 +1131,7 @@ export class Bridge implements HubBackend, WebBackend {
         const userId = (person as Record<string, unknown>)[platform];
         if (typeof userId !== 'string') continue;
         const key = `${platform}:dm:${userId}`;
-        const dm = this.store.getSession(key);
+        const dm = await this.store.getSession(key);
         if (!dm) continue;
         asked++;
         this.choose({
@@ -1069,7 +1186,7 @@ export class Bridge implements HubBackend, WebBackend {
   }
 
   async webWorkspace(key: string, action: 'merge' | 'discard', preview: boolean): Promise<string> {
-    const session = this.store.getSession(key);
+    const session = await this.store.getSession(key);
     if (!session) throw new Error('no such conversation');
     const ws = this.agent(session.agent).workspace;
     if (!ws) throw new Error(`${session.agent} has no branches (worktree is off)`);
@@ -1095,8 +1212,8 @@ export class Bridge implements HubBackend, WebBackend {
             if (!p.ok) throw new Error(p.reason);
           }
           const result = action === 'merge' ? await ws.merge(key) : await ws.discard(key);
-          this.store.deleteSession(key);
-          this.store.trace(key, action === 'merge' ? 'merged' : 'discarded', `${who} (web)`, { result });
+          await this.store.deleteSession(key);
+          this.trace(key, action === 'merge' ? 'merged' : 'discarded', `${who} (web)`, { result });
           await this.send(thread, `${result}
 _(from the dashboard, by ${who})_`).catch(() => {});
           resolve(result);
@@ -1139,7 +1256,7 @@ _(from the dashboard, by ${who})_`).catch(() => {});
     if (!a) {
       const cfg = Object.hasOwn(this.cfg.agents, name) ? this.cfg.agents[name] : undefined;
       if (!cfg) throw new Error(`unknown agent "${name}"`);
-      a = createAgent(name, cfg);
+      a = this.agentFactory(name, cfg, { secrets: this.secrets });
       this.agents.set(name, a);
     }
     return a;
@@ -1233,7 +1350,7 @@ _(from the dashboard, by ${who})_`).catch(() => {});
 
     const result = await decided.promise;
     const outcome = cancelled ? `✖ Cancelled: ${cancelled}.` : opts.outcome(result);
-    this.store.trace(opts.key, 'choice', result?.by ?? (cancelled ? 'cancelled' : 'timeout'), { value: result?.value ?? null, outcome, buttons: !!messageId });
+    this.trace(opts.key, 'choice', result?.by ?? (cancelled ? 'cancelled' : 'timeout'), { value: result?.value ?? null, outcome, buttons: !!messageId });
     try {
       if (messageId && im?.resolveChoice) {
         await im.resolveChoice(opts.thread.channelId, messageId, opts.text, outcome).catch(() => this.send(opts.thread, outcome));

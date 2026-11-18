@@ -3,7 +3,8 @@ import { request } from 'node:http';
 import { test } from 'node:test';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
-import { Store } from '../core/store.ts';
+import { handleWeb } from '../web/api.ts';
+import { SqliteStore } from '../core/store.ts';
 import { memoryStorage } from '../mcp/oauth.ts';
 import { FakeIm } from './helpers.ts';
 
@@ -27,7 +28,8 @@ im: { slack: { app_token: env:A, bot_token: env:B } }
 tools:
   remote: { url: "http://127.0.0.1:9/mcp", oauth: true }
 `);
-  const bridge = new Bridge({ cfg, store: new Store(':memory:'), ims: [new FakeIm()], oauthStorage: memoryStorage(), log: () => {} });
+  // Like the CLI: the dashboard is mounted next to the bridge's own routes.
+  const bridge: Bridge = new Bridge({ extraRoutes: (req, res, url) => handleWeb(bridge, req, res, url), cfg, store: new SqliteStore(':memory:'), ims: [new FakeIm()], oauthStorage: memoryStorage(), log: () => {} });
   const { mcpUrl: base } = await bridge.start();
   const host = new URL(base).host;
   try {

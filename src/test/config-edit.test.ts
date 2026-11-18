@@ -10,7 +10,7 @@ import { configJsonSchema, SCHEMA_FILE } from '../config/json-schema.ts';
 import type { BridgeConfig } from '../config/schema.ts';
 import { TEMPLATE } from '../template.ts';
 import { Bridge } from '../core/bridge.ts';
-import { Store } from '../core/store.ts';
+import { SqliteStore } from '../core/store.ts';
 import { FakeIm } from './helpers.ts';
 
 const BASE = `server: { port: 0 }
@@ -222,7 +222,7 @@ test('gate: a rejected change stays out until the file changes; an invalid file 
 test('config confirmation: owners are asked in their DM, and a click applies the change everywhere', async () => {
   const f = gateFixture();
   const im = new FakeIm().withButtons();
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   let bridge: Bridge | undefined;
   const gate = new ConfigGate({
     path: f.path,

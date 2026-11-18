@@ -7,9 +7,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { parseConfig } from '../config/load.ts';
 import { Bridge, codeBlock } from '../core/bridge.ts';
+import { localAgents } from '../adapters/agent/local.ts';
 import { newEnvelope } from '../core/envelope.ts';
-import { Store } from '../core/store.ts';
-import { redact, registerSecret } from '../core/redact.ts';
+import { SqliteStore } from '../core/store.ts';
+import { Redactor } from '../core/redact.ts';
 import type { AgentAdapter, AgentTurn, Workspace } from '../adapters/agent/types.ts';
 import type { ImAdapter, OutboundMessage } from '../adapters/im/types.ts';
 import { FakeIm } from './helpers.ts';
@@ -57,11 +58,12 @@ function scripted(name: string, script: (mcp: Client, turn: AgentTurn) => Promis
 
 const text = (r: any) => r.content.map((c: any) => c.text).join('');
 
-async function setup(opts: { agents?: AgentAdapter[]; im?: FakeIm; store?: Store; extra?: string; filesDir?: string } = {}) {
+async function setup(opts: { agents?: AgentAdapter[]; im?: FakeIm; store?: SqliteStore; extra?: string; filesDir?: string } = {}) {
   const im = opts.im ?? new FakeIm();
-  const store = opts.store ?? new Store(':memory:');
+  const store = opts.store ?? new SqliteStore(':memory:');
   const logs: string[] = [];
   const bridge = new Bridge({
+    agentFactory: localAgents,
     cfg: parseConfig(yaml(opts.extra)),
     store,
     ims: [im],
@@ -102,7 +104,7 @@ test('a failing IM never crashes the bridge (no unhandled rejection) and the tur
 });
 
 test('replay counts the interruption before anything runs, and nothing runs before the IMs are connected', async () => {
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   const key = 'slack:C1:T1';
   const envelope = newEnvelope({
     sender: { kind: 'person', id: 'alice', platform: 'slack', platformUserId: 'U1' },
@@ -122,7 +124,7 @@ test('replay counts the interruption before anything runs, and nothing runs befo
   }
   const runs: string[] = [];
   const boss: AgentAdapter = { name: 'boss', async run(t) { runs.push(t.text); return { text: 'ok' }; } };
-  const bridge = new Bridge({ cfg: parseConfig(yaml()), store, ims: [new SlowIm()], agents: new Map([['boss', boss]]), log: () => {} });
+  const bridge = new Bridge({ agentFactory: localAgents, cfg: parseConfig(yaml()), store, ims: [new SlowIm()], agents: new Map([['boss', boss]]), log: () => {} });
   const started = bridge.start();
   await until(() => JSON.parse(store.db.prepare('SELECT payload FROM queue').get()!.payload as string).interrupted === 1, 'the interruption to be saved');
   assert.deepEqual(runs, [], 'nothing runs before the IM is connected');
@@ -134,7 +136,7 @@ test('replay counts the interruption before anything runs, and nothing runs befo
 });
 
 test('shutdown leaves a running turn queued, and the next start resumes it', async () => {
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   let started = false;
   let fail: (e: Error) => void = () => {};
   // Like claude-code: stop() kills the running process, which fails the turn.
@@ -171,8 +173,8 @@ agents: { hold: { type: stdio, command: node, args: [src/test/fixtures/hold-agen
 routes: [ { from: "slack:*", when: { sender: [alice] }, to: hold } ]
 `;
   const im = new FakeIm();
-  const store = new Store(':memory:');
-  const bridge = new Bridge({ cfg: parseConfig(cfgText('v1')), store, ims: [im], log: () => {} });
+  const store = new SqliteStore(':memory:');
+  const bridge = new Bridge({ agentFactory: localAgents, cfg: parseConfig(cfgText('v1')), store, ims: [im], log: () => {} });
   await bridge.start();
   const pidIn = (threadId: string) => {
     const s = store.readTrace({ sessionKey: `slack:C1:${threadId}` }).find((t) => t.kind === 'reply');
@@ -448,7 +450,7 @@ test('dashboard: branch status is cached and refreshed when a turn ends', async 
 });
 
 test('store: deleting a conversation deletes its delegation sessions; retention prunes old rows', () => {
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   const s = (key: string) => store.upsertSession({ key, agent: 'a', agent_session_id: 'x', platform: 'slack', channel_id: 'C', thread_id: 'T', initiator: 'alice' });
   for (const k of ['slack:C:T', 'slack:C:T>helper', 'slack:C:T>helper>boss', 'slack:C:T2', 'slack:C:T%']) s(k);
   store.deleteSession('slack:C:T');
@@ -457,7 +459,7 @@ test('store: deleting a conversation deletes its delegation sessions; retention 
   store.enqueue('q1', 'k', {});
   store.finish('q1', 'done');
   store.enqueue('q2', 'k', {});
-  store.trace('k', 'x', 'y', {});
+  store.trace('k', 'x', 'y', '{}');
   const later = Date.now() + 1000;
   assert.deepEqual(store.sessionsActiveSince(later), []);
   assert.equal(store.sessionsActiveSince(0).length, 2);
@@ -467,6 +469,9 @@ test('store: deleting a conversation deletes its delegation sessions; retention 
 });
 
 test('trace redaction: token formats and registered secret values', () => {
+  const r = new Redactor();
+  const redact = (s: string) => r.redact(s);
+  const registerSecret = (s: string) => r.add(s);
   const cases = [
     'github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz',
     'Authorization: token 0123456789abcdef0123456789abcdef',

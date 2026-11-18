@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
+import { localAgents } from '../adapters/agent/local.ts';
 import { newEnvelope } from '../core/envelope.ts';
-import { Store } from '../core/store.ts';
+import { SqliteStore } from '../core/store.ts';
 import type { AgentAdapter, AgentTurn } from '../adapters/agent/types.ts';
 import { ensureWorktree } from '../adapters/agent/worktree.ts';
 import { FakeIm } from './helpers.ts';
@@ -21,7 +22,7 @@ routes: [ { from: "slack:*", when: { sender: [alice] }, to: cc } ]
 `);
 
 /** Leave a turn in the store as if the bridge died mid-turn after the agent reported its session id. */
-function crashedTurn(store: Store, interrupted = 0) {
+function crashedTurn(store: SqliteStore, interrupted = 0) {
   const key = 'slack:C1:T1';
   store.upsertSession({ key, agent: 'cc', agent_session_id: 'claude-123', platform: 'slack', channel_id: 'C1', thread_id: 'T1', initiator: 'alice' });
   const envelope = newEnvelope({
@@ -33,11 +34,11 @@ function crashedTurn(store: Store, interrupted = 0) {
   store.markRunning(envelope.id, job);
 }
 
-async function restart(store: Store) {
+async function restart(store: SqliteStore) {
   const turns: AgentTurn[] = [];
   const cc: AgentAdapter = { name: 'cc', async run(t) { turns.push(t); return { text: 'resumed ok' }; } };
   const im = new FakeIm();
-  const bridge = new Bridge({ cfg, store, ims: [im], agents: new Map([['cc', cc]]), log: () => {} });
+  const bridge = new Bridge({ agentFactory: localAgents, cfg, store, ims: [im], agents: new Map([['cc', cc]]), log: () => {} });
   await bridge.start();
   await bridge.idle();
   await bridge.stop();
@@ -45,7 +46,7 @@ async function restart(store: Store) {
 }
 
 test('a turn cut off by a restart resumes the same agent session', async () => {
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   crashedTurn(store);
   const { turns, im } = await restart(store);
   assert.equal(turns.length, 1);
@@ -56,7 +57,7 @@ test('a turn cut off by a restart resumes the same agent session', async () => {
 });
 
 test('a turn interrupted too often is given up', async () => {
-  const store = new Store(':memory:');
+  const store = new SqliteStore(':memory:');
   crashedTurn(store, 2);
   const { turns, im } = await restart(store);
   assert.equal(turns.length, 0);

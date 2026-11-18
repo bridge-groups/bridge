@@ -184,3 +184,15 @@ tools:
     await hub.stop();
   }
 });
+
+test('an unreachable HTTP tool server leaves nothing retrying in the background', async () => {
+  // Port 9 (discard) refuses connections: auto tries streamable HTTP, then SSE, and both fail.
+  const cfg = parseConfig(`version: 1\ntools:\n  gone: { url: "http://127.0.0.1:9/mcp" }\n`);
+  const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+  const before = timers();
+  const hub = new ToolHub(cfg.tools);
+  await assert.rejects(hub.listTools('gone'), /127\.0\.0\.1:9/);
+  // The SSE client reconnected on its own timer forever; a failed attempt must close it.
+  assert.ok(timers() <= before, `timers left: ${timers() - before}`);
+  await hub.stop();
+});

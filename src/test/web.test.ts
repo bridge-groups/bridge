@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import type { AgentAdapter, Workspace } from '../adapters/agent/types.ts';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
-import { Store } from '../core/store.ts';
+import { handleWeb } from '../web/api.ts';
+import { SqliteStore } from '../core/store.ts';
 import { memoryStorage } from '../mcp/oauth.ts';
 import { FakeIm } from './helpers.ts';
 
@@ -26,7 +27,8 @@ agents: { cc: { type: stdio, command: "true" } }
 routes: [ { from: "slack:*", when: { sender: [alice, bob] }, to: cc } ]
 `);
   const im = new FakeIm();
-  const bridge = new Bridge({ cfg, store: new Store(':memory:'), ims: [im], agents: new Map([['cc', cc]]), oauthStorage: memoryStorage(), log: () => {} });
+  // Like the CLI: the dashboard is mounted next to the bridge's own routes.
+  const bridge: Bridge = new Bridge({ extraRoutes: (req, res, url) => handleWeb(bridge, req, res, url), cfg, store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['cc', cc]]), oauthStorage: memoryStorage(), log: () => {} });
   const { mcpUrl: base } = await bridge.start();
   const get = async (path: string) => (await fetch(base + path)).json() as Promise<any>;
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>

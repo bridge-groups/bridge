@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type Server as HttpServer } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -19,59 +19,37 @@ export interface ToolResult {
 export interface HubBackend {
   listTools(grant: SessionGrant): Promise<Tool[]>;
   callTool(grant: SessionGrant, name: string, args: Record<string, unknown>): Promise<ToolResult>;
-  /** Other local routes (dashboard, OAuth); return false to fall through. */
-  handleHttp?(req: IncomingMessage, res: import('node:http').ServerResponse, url: URL): Promise<boolean>;
 }
 
 /**
- * One local HTTP server. Each agent turn gets its own URL (`/mcp/<token>`), so every
- * tool call is tied to the session that made it and nothing else.
+ * The bridge's MCP endpoints. Each agent turn gets its own URL (`<base>/mcp/<token>`), so every tool call is
+ * tied to the session that made it and nothing else. Served by whatever HTTP server the bridge is mounted on.
  */
 export class McpHub {
   private readonly grants = new Map<string, SessionGrant>();
   private readonly backend: HubBackend;
-  private http?: HttpServer;
-  private baseUrl = '';
+  /** Where agents reach the endpoints, without a trailing slash. */
+  private readonly baseUrl: () => string;
 
-  constructor(backend: HubBackend) {
+  constructor(backend: HubBackend, baseUrl: () => string) {
     this.backend = backend;
-  }
-
-  async listen(host: string, port: number): Promise<string> {
-    this.http = createServer((req, res) => {
-      this.handle(req, res).catch((err) => {
-        if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: String(err?.message ?? err) }));
-      });
-    });
-    await new Promise<void>((resolve, reject) => {
-      this.http!.once('error', reject);
-      this.http!.listen(port, host, () => resolve());
-    });
-    const addr = this.http.address();
-    const actualPort = typeof addr === 'object' && addr ? addr.port : port;
-    this.baseUrl = `http://${host}:${actualPort}`;
-    return this.baseUrl;
+    this.baseUrl = baseUrl;
   }
 
   grant(g: SessionGrant): { url: string; token: string; revoke: () => void } {
     const token = randomBytes(18).toString('base64url');
     this.grants.set(token, g);
-    return { url: `${this.baseUrl}/mcp/${token}`, token, revoke: () => this.grants.delete(token) };
+    return { url: `${this.baseUrl()}/mcp/${token}`, token, revoke: () => this.grants.delete(token) };
   }
 
-  async close() {
-    await new Promise<void>((resolve) => (this.http ? this.http.close(() => resolve()) : resolve()));
-  }
-
-  private async handle(req: IncomingMessage, res: import('node:http').ServerResponse) {
-    const url = new URL(req.url ?? '/', 'http://x');
-    if (!url.pathname.startsWith('/mcp/') && this.backend.handleHttp && (await this.backend.handleHttp(req, res, url))) return;
-    const m = /^\/mcp\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
-    const grant = m ? this.grants.get(m[1]!) : undefined;
+  /** Serve `/mcp/<token>` (path relative to where the bridge is mounted); false for any other path. */
+  async handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
+    const m = /^\/mcp\/([A-Za-z0-9_-]+)$/.exec(path);
+    if (!m) return false;
+    const grant = this.grants.get(m[1]!);
     if (!grant) {
       res.writeHead(404).end();
-      return;
+      return true;
     }
     const body = req.method === 'POST' ? await readJson(req) : undefined;
 
@@ -93,6 +71,7 @@ export class McpHub {
     });
     await server.connect(transport);
     await transport.handleRequest(req, res, body);
+    return true;
   }
 }
 

@@ -9,7 +9,8 @@ import {
 } from '../adapters/agent/worktree.ts';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
-import { Store } from '../core/store.ts';
+import { localAgents } from '../adapters/agent/local.ts';
+import { SqliteStore } from '../core/store.ts';
 import type { AgentAdapter, Workspace } from '../adapters/agent/types.ts';
 import { FakeIm } from './helpers.ts';
 
@@ -225,7 +226,7 @@ agents: { cc: { type: stdio, command: "true" } }
 routes: [ { from: "slack:*", when: { sender: [alice] }, to: cc } ]
 `);
   const im = new FakeIm();
-  const bridge = new Bridge({ cfg, store: new Store(':memory:'), ims: [im], agents: new Map([['cc', cc]]), log: () => {} });
+  const bridge = new Bridge({ agentFactory: localAgents, cfg, store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['cc', cc]]), log: () => {} });
   await bridge.start();
   const answers: string[] = [];
   im.onSend((m) => {

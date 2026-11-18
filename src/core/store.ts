@@ -1,7 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { redact } from './redact.ts';
 
 export interface SessionRow {
   key: string;
@@ -33,8 +32,41 @@ export interface TraceRow {
   detail: string;
 }
 
-/** SQLite holds sessions, the inbound queue, approvals and the audit trace. Pass ":memory:" in tests. */
-export class Store {
+type Awaitable<T> = T | Promise<T>;
+
+/**
+ * Where a bridge keeps its state: conversations (sessions), the inbound queue that survives restarts, and the
+ * audit trail. Methods may return promises, so an embedding app can keep it in its own database; the bridge
+ * awaits every call and never runs two writes for one conversation at once. SqliteStore is the default.
+ */
+export interface BridgeStore {
+  getSession(key: string): Awaitable<SessionRow | undefined>;
+  /** Create or update a conversation; `last_active` becomes now. */
+  upsertSession(s: Omit<SessionRow, 'created_at' | 'last_active' | 'spent_usd'>): Awaitable<SessionRow>;
+  updateSession(key: string, patch: { agent_session_id?: string | null; addSpentUsd?: number }): Awaitable<void>;
+  /** Delete a conversation and the conversations it delegated to (keys starting with `<key>>`). */
+  deleteSession(key: string): Awaitable<void>;
+  /** Keys of conversations active at or after `since`. */
+  sessionsActiveSince(since: number): Awaitable<string[]>;
+  /** Most recently active first. */
+  listSessions(limit?: number): Awaitable<SessionRow[]>;
+  enqueue(id: string, sessionKey: string, payload: unknown): Awaitable<void>;
+  markRunning(id: string, payload: unknown): Awaitable<void>;
+  finish(id: string, status: 'done' | 'failed' | 'expired'): Awaitable<void>;
+  /** Queue entries still pending or running, oldest first; older than `ttlMs` ones are marked expired instead. */
+  takePending(ttlMs: number): Awaitable<QueueRow[]>;
+  prune(opts: { queueBefore: number; historyBefore?: number }): Awaitable<{ queue: number; trace: number; sessions: number }>;
+  /** Append to the audit trail. `detail` is JSON the bridge has already cleared of credentials. */
+  trace(sessionKey: string, kind: string, actor: string, detail: string): Awaitable<void>;
+  /** The cheapest of `agent`'s last `recent` replies that reported a cost (`kind: reply`, `detail.costUsd`). */
+  cheapestRecentTurn(agent: string, recent?: number): Awaitable<number | undefined>;
+  /** Oldest first: the last `limit` entries, of one conversation or of all. */
+  readTrace(opts?: { sessionKey?: string; limit?: number }): Awaitable<TraceRow[]>;
+  close(): Awaitable<void>;
+}
+
+/** SQLite holds sessions, the inbound queue and the audit trace. Pass ":memory:" in tests. */
+export class SqliteStore implements BridgeStore {
   readonly db: DatabaseSync;
 
   constructor(path: string) {
@@ -153,10 +185,10 @@ export class Store {
     return { queue: Number(queue), trace: Number(trace), sessions: Number(sessions) };
   }
 
-  trace(sessionKey: string, kind: string, actor: string, detail: unknown) {
+  trace(sessionKey: string, kind: string, actor: string, detail: string) {
     this.db
       .prepare('INSERT INTO trace (ts, session_key, kind, actor, detail) VALUES (?, ?, ?, ?, ?)')
-      .run(Date.now(), sessionKey, kind, actor, redact(JSON.stringify(detail ?? null)));
+      .run(Date.now(), sessionKey, kind, actor, detail);
   }
 
   /**

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * Endpoint addresses as written in bridge.yaml:
  *   slack:#dev      IM channel by name      telegram:*   any chat on that IM
@@ -44,4 +45,22 @@ export function parseDuration(s: string): number {
   const n = Number(m[1]);
   const unit = { ms: 1, s: 1e3, m: 60e3, h: 3600e3, d: 86400e3 }[m[2] as 'ms' | 's' | 'm' | 'h' | 'd'];
   return n * unit;
+}
+
+/** The URL this machine reaches a server listening on `host:port` at (a wildcard host means loopback). */
+export function localBaseUrl(server: { host: string; port: number }) {
+  const host = ['0.0.0.0', '::', ''].includes(server.host) ? '127.0.0.1' : server.host;
+  return `http://${host.includes(':') ? `[${host}]` : host}:${server.port}`;
+}
+
+/** A conversation key as a short, readable, unique name (worktree folders and branches use it). */
+export function sessionSlug(sessionKey: string): string {
+  const readable = sessionKey
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40)
+    .replace(/-$/, '');
+  const hash = createHash('sha1').update(sessionKey).digest('hex').slice(0, 6);
+  return `${readable}-${hash}`;
 }

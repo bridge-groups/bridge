@@ -3,10 +3,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { auth, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { HttpToolServerConfig } from '../config/schema.ts';
-import { registerSecret } from '../core/redact.ts';
-import { deleteSecret, readSecret, resolveSecret, setSecret } from '../secrets.ts';
+import type { SecretResolver } from '../core/secrets.ts';
 
-/** Where OAuth state lives. Default: the OS keychain, one item per server (`oauth.<server>`). */
+/** Where OAuth state lives: the embedding app decides (the CLI uses the OS keychain, one item per server). */
 export interface OAuthStorage {
   get(server: string): StoredAuth;
   set(server: string, value: StoredAuth): void;
@@ -20,44 +19,17 @@ export interface StoredAuth {
   tokens?: OAuthTokens;
 }
 
-/**
- * Keychain-backed storage with an in-memory copy: the SDK asks for tokens on every request, and
- * reading the keychain spawns a process. Writes go through to the keychain immediately.
- */
-export function keychainStorage(): OAuthStorage {
-  const cache = new Map<string, StoredAuth>();
-  const load = (server: string): StoredAuth => {
-    const hit = cache.get(server);
-    if (hit) return hit;
-    const raw = readSecret(`oauth.${server}`);
-    let value: StoredAuth = {};
-    if (raw) {
-      try {
-        value = JSON.parse(raw) as StoredAuth;
-      } catch {
-        throw new Error(`the stored sign-in for "${server}" is unreadable — run: bridge auth ${server} --sign-out, then sign in again`);
-      }
-    }
-    registerTokens(value);
-    cache.set(server, value);
-    return value;
+/** Calls `onToken` with every access and refresh token read from or written to `storage`. */
+export function watchTokens(storage: OAuthStorage, onToken: (token: string) => void): OAuthStorage {
+  const seen = (v: StoredAuth) => {
+    for (const t of [v.tokens?.access_token, v.tokens?.refresh_token]) if (t) onToken(t);
+    return v;
   };
   return {
-    get: (server) => structuredClone(load(server)),
-    set(server, value) {
-      setSecret(`oauth.${server}`, JSON.stringify(value));
-      registerTokens(value);
-      cache.set(server, structuredClone(value));
-    },
-    delete(server) {
-      deleteSecret(`oauth.${server}`);
-      cache.delete(server);
-    },
+    get: (server) => seen(storage.get(server)),
+    set: (server, value) => storage.set(server, seen(value)),
+    delete: (server) => storage.delete(server),
   };
-}
-
-function registerTokens(value: StoredAuth) {
-  for (const t of [value.tokens?.access_token, value.tokens?.refresh_token]) if (t) registerSecret(t);
 }
 
 export function memoryStorage(): OAuthStorage {
@@ -90,6 +62,7 @@ export class BridgeOAuthProvider implements OAuthClientProvider {
   private readonly cfg: HttpToolServerConfig;
   private readonly storage: OAuthStorage;
   readonly redirectUrl: string;
+  private readonly secrets: SecretResolver;
   private readonly flow?: { onRedirect: (url: URL) => void };
   private verifier?: string;
   private flowClient?: OAuthClientInformationMixed;
@@ -100,12 +73,14 @@ export class BridgeOAuthProvider implements OAuthClientProvider {
     cfg: HttpToolServerConfig,
     storage: OAuthStorage,
     redirectUrl: string,
+    secrets: SecretResolver,
     flow?: { onRedirect: (url: URL) => void },
   ) {
     this.server = server;
     this.cfg = cfg;
     this.storage = storage;
     this.redirectUrl = redirectUrl;
+    this.secrets = secrets;
     this.flow = flow;
   }
 
@@ -133,7 +108,7 @@ export class BridgeOAuthProvider implements OAuthClientProvider {
     if (this.opts.client_id) {
       return {
         client_id: this.opts.client_id,
-        ...(this.opts.client_secret ? { client_secret: resolveSecret(this.opts.client_secret) } : {}),
+        ...(this.opts.client_secret ? { client_secret: this.secrets(this.opts.client_secret) } : {}),
       };
     }
     if (this.flowClient) return this.flowClient;
@@ -211,13 +186,21 @@ export class OAuthFlows {
   private readonly servers: () => Record<string, unknown>;
   readonly storage: OAuthStorage;
   readonly redirectUrl: string;
+  private readonly secrets: SecretResolver;
   /** Called after a sign-in or sign-out (e.g. to reconnect the tool server). */
   private readonly onChange: (server: string) => void;
 
-  constructor(servers: () => Record<string, unknown>, storage: OAuthStorage, redirectUrl: string, onChange: (server: string) => void = () => {}) {
+  constructor(
+    servers: () => Record<string, unknown>,
+    storage: OAuthStorage,
+    redirectUrl: string,
+    secrets: SecretResolver,
+    onChange: (server: string) => void = () => {},
+  ) {
     this.servers = servers;
     this.storage = storage;
     this.redirectUrl = redirectUrl;
+    this.secrets = secrets;
     this.onChange = onChange;
   }
 
@@ -250,7 +233,7 @@ export class OAuthFlows {
   async start(server: string): Promise<URL> {
     const cfg = this.config(server);
     let target: URL | undefined;
-    const provider = new BridgeOAuthProvider(server, cfg, this.storage, this.redirectUrl, { onRedirect: (u) => (target = u) });
+    const provider = new BridgeOAuthProvider(server, cfg, this.storage, this.redirectUrl, this.secrets, { onRedirect: (u) => (target = u) });
     const scope = typeof cfg.oauth === 'object' ? cfg.oauth.scopes?.join(' ') : undefined;
     const result = await auth(provider, { serverUrl: cfg.url, scope });
     if (result !== 'REDIRECT' || !target) throw new Error(`sign-in to "${server}" did not ask for authorization (${result})`);

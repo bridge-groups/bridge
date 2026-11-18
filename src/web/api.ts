@@ -39,9 +39,9 @@ export interface WebTool {
 
 /** What the dashboard needs from the bridge. */
 export interface WebBackend {
-  status(): unknown;
+  status(): Promise<unknown>;
   webSessions(): Promise<WebSession[]>;
-  webTrace(sessionKey: string | undefined, limit: number): { ts: number; session: string; kind: string; actor: string; detail: string }[];
+  webTrace(sessionKey: string | undefined, limit: number): Promise<{ ts: number; session: string; kind: string; actor: string; detail: string }[]>;
   webChoices(): WebChoice[];
   /** Decide a pending choice as the bridge owner; throws when the owner may not decide it. */
   webDecide(id: string, value: string): string;
@@ -88,17 +88,17 @@ export async function handleWeb(b: WebBackend, req: IncomingMessage, res: Server
       res.end(PAGE);
       return true;
     }
-    if (path === '/api/status' && req.method === 'GET') return json(res, 200, b.status());
+    if (path === '/api/status' && req.method === 'GET') return json(res, 200, await b.status());
     const signIn = /^\/api\/oauth\/([\w.-]+)$/.exec(path);
     if (signIn && req.method === 'GET') {
       return json(res, 200, { status: b.oauth.status(signIn[1]!), last: b.oauth.lastResult(signIn[1]!) ?? null });
     }
     if (path === '/api/overview' && req.method === 'GET') {
-      return json(res, 200, { status: b.status(), sessions: await b.webSessions(), choices: b.webChoices(), config: b.webConfig() });
+      return json(res, 200, { status: await b.status(), sessions: await b.webSessions(), choices: b.webChoices(), config: b.webConfig() });
     }
     if (path === '/api/trace' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 200) || 200, 2000);
-      return json(res, 200, b.webTrace(url.searchParams.get('session') ?? undefined, limit));
+      return json(res, 200, await b.webTrace(url.searchParams.get('session') ?? undefined, limit));
     }
     if (path === '/api/tools' && req.method === 'GET') return json(res, 200, await b.webTools());
     if (path === '/api/config' && req.method === 'GET') return json(res, 200, b.webConfig());
@@ -154,7 +154,4 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 /** The base URL for this machine's browser (a wildcard bind address isn't one). */
-export function localBaseUrl(server: { host: string; port: number }) {
-  const host = ['0.0.0.0', '::', ''].includes(server.host) ? '127.0.0.1' : server.host;
-  return `http://${host.includes(':') ? `[${host}]` : host}:${server.port}`;
-}
+export { localBaseUrl } from '../core/address.ts';

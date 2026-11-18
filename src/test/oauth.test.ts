@@ -1,3 +1,4 @@
+import { envSecrets } from '../core/secrets.ts';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
@@ -105,7 +106,7 @@ tools:
   const redirectUrl = 'http://127.0.0.1:7377/oauth/callback';
   const hub = new ToolHub(cfg.tools, { oauth: { storage, redirectUrl } });
   const signedIn: string[] = [];
-  const flows = new OAuthFlows(() => cfg.tools, storage, redirectUrl, (s) => {
+  const flows = new OAuthFlows(() => cfg.tools, storage, redirectUrl, envSecrets(), (s) => {
     signedIn.push(s);
     void hub.reset(s);
   });
@@ -156,7 +157,7 @@ version: 1
 tools:
   plain: { url: "http://127.0.0.1:9/mcp" }
 `);
-  const flows = new OAuthFlows(() => cfg.tools, memoryStorage(), 'http://127.0.0.1:7377/oauth/callback');
+  const flows = new OAuthFlows(() => cfg.tools, memoryStorage(), 'http://127.0.0.1:7377/oauth/callback', envSecrets());
   assert.equal(flows.status('plain'), 'not-oauth');
   await assert.rejects(flows.start('plain'), /does not use OAuth/);
 });

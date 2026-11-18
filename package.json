@@ -1,8 +1,19 @@
 {
-  "name": "bridge",
+  "name": "@bridge-groups/bridge",
   "version": "0.1.0",
-  "description": "Connect agents to IM, to other agents, and to tools — one local process, one bridge.yaml.",
+  "description": "Connect agents to IM, to other agents, and to tools: a library to embed in an app or service, and a CLI for your own machine.",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./out/index.d.ts",
+      "default": "./out/index.js"
+    },
+    "./local": {
+      "types": "./out/local.d.ts",
+      "default": "./out/local.js"
+    },
+    "./package.json": "./package.json"
+  },
   "license": "MIT",
   "bin": {
     "bridge": "out/cli.js"
