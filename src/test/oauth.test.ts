@@ -112,7 +112,7 @@ tools:
   });
   try {
     assert.equal(flows.status('remote'), 'signed-out');
-    await assert.rejects(hub.listTools('remote'), /not signed in to "remote" — run: bridge auth remote/);
+    await assert.rejects(hub.listTools('remote'), /not signed in to "remote" — the bridge's owner has to sign in to it first/);
 
     // Browser: start → provider's /authorize → back to our callback with code + state.
     const authorize = await flows.start('remote');

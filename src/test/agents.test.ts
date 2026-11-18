@@ -14,6 +14,7 @@ import { KILL_GRACE_MS } from '../adapters/agent/process-tree.ts';
 import { StdioAgent } from '../adapters/agent/stdio.ts';
 import type { AgentTurn } from '../adapters/agent/types.ts';
 import { newEnvelope } from '../core/envelope.ts';
+import { until } from './helpers.ts';
 
 const tmp = (prefix: string) => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
@@ -25,14 +26,6 @@ function turn(text: string, extra: Partial<AgentTurn> = {}): AgentTurn {
   return { envelope, text, mcp: { url: 'http://127.0.0.1:1/mcp/t', endpoint: 'http://127.0.0.1:1/mcp', token: 't' }, ...extra };
 }
 
-/** Poll until `check` holds (deterministic: waits for the condition, fails after `ms`). */
-async function until(check: () => boolean, what: string, ms = 10_000) {
-  const end = Date.now() + ms;
-  while (!check()) {
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 20));
-  }
-}
 
 const alive = (pid: number) => {
   try {
@@ -81,11 +74,8 @@ printf '{"type":"result","result":"resume=%s","session_id":"S1"}\\n' "$resume"
   assert.equal(after.text, 'resume=S1');
   assert.match(notices.join('\n'), /works on its own branch/);
 
-  // A session from another directory is not resumed; an untagged (older) one only if the worktree is not new.
+  // A session from another directory is not resumed.
   assert.equal((await agent.run(turn('x', { agentSessionId: 'S1@000000000000' }))).text, 'resume=none');
-  assert.equal((await agent.run(turn('x', { agentSessionId: 'S0' }))).text, 'resume=S0');
-  await agent.workspace!.discard('slack:C1:T1');
-  assert.equal((await agent.run(turn('x', { agentSessionId: 'S0' }))).text, 'resume=none');
 });
 
 test('claude-code: a process that exits without reading its prompt fails the turn instead of crashing (EPIPE)', async () => {

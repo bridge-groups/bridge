@@ -1,3 +1,5 @@
+import { cells, headingText, isTableRow, isTableSeparator, plain } from './markdown.ts';
+
 /**
  * Standard Markdown (what agents write) → Slack mrkdwn.
  * Slack has no headings or tables and uses *bold*, _italic_, ~strike~, <url|text>.
@@ -33,10 +35,9 @@ export function toSlackMrkdwn(md: string): string {
       continue;
     }
 
-    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
-    if (heading) {
-      // The whole heading is bold already; inner bold markers would nest badly.
-      out.push(`*${inline(heading[1]!.replace(/\*\*|__/g, ''))}*`);
+    const heading = headingText(line);
+    if (heading !== undefined) {
+      out.push(`*${inline(heading)}*`);
       continue;
     }
     if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
@@ -69,7 +70,7 @@ function inline(text: string): string {
 }
 
 /** The three characters Slack requires as entities in any text. */
-export function escape(s: string): string {
+function escape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
@@ -87,34 +88,6 @@ function inlinePlain(s: string): string {
   s = s.replace(/(^|[^\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\w)/g, '$1_$2_');
   s = s.replace(/~~(?=\S)([^~]+?)(?<=\S)~~/g, '~$1~');
   return s.replaceAll(BOLD, '*');
-}
-
-export function isTableRow(line: string) {
-  const t = line.trim();
-  return t.startsWith('|') && t.length > 1;
-}
-
-export function isTableSeparator(line: string) {
-  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
-}
-
-export function cells(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split(/(?<!\\)\|/)
-    .map((c) => c.trim().replace(/\\\|/g, '|'));
-}
-
-/** Table cells go into a code block, so strip markdown that would show literally. */
-export function plain(s: string): string {
-  return s
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/<br\s*\/?>/gi, ' ');
 }
 
 /** Wider than this (in monospace columns) and a table would wrap in Slack, so rows become records. */

@@ -44,12 +44,11 @@ test('names from Object.prototype are not agents or IMs', () => {
   );
 });
 
-test('contradicting listen / mention is rejected', () => {
+test('when.listen is refused with what to write instead', () => {
   assert.throws(
-    () => parseConfig(base + `routes:\n  - { from: "slack:#dev", when: { listen: all, mention: true }, to: remote }\n`),
-    (e: unknown) => e instanceof ConfigError && /contradicts when.mention/.test(e.message),
+    () => parseConfig(base + `routes:\n  - { from: "slack:#dev", when: { listen: all }, to: remote }\n`),
+    (e: unknown) => e instanceof ConfigError && /write mention: false/.test(e.message),
   );
-  parseConfig(base + `routes:\n  - { from: "slack:#dev", when: { listen: all, mention: false }, to: remote }\n`);
 });
 
 test('policies: budgets and hop limits match by agent only; external people cannot approve', () => {

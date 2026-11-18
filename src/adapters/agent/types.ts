@@ -36,7 +36,10 @@ export interface AgentReply {
  * Every method runs git (possibly over the network for PRs), so all of them are async.
  */
 export interface Workspace {
-  /** Human-readable status, or undefined when this conversation has no workspace yet. */
+  /**
+   * The branch's status for people (name, unmerged commits, diffstat, uncommitted files), or undefined when
+   * this conversation has no branch yet.
+   */
   status(sessionKey: string): Promise<string | undefined>;
   /** What merging would do, or why it can't happen now. */
   previewMerge(sessionKey: string): Promise<{ ok: true; summary: string } | { ok: false; reason: string }>;
@@ -52,7 +55,7 @@ export interface Workspace {
    * `isIdle(slug)` decides (slug = sessionSlug(key)). A worktree that fails is listed in `errors`
    * and doesn't stop the others.
    */
-  prune?(isIdle: (slug: string) => boolean): Promise<{ removed: string[]; errors: string[] }>;
+  prune(isIdle: (slug: string) => boolean): Promise<{ removed: string[]; errors: string[] }>;
   /** Push the branch and open a pull request; absent when no git token is configured. */
   previewPr?(sessionKey: string): Promise<{ ok: true; summary: string } | { ok: false; reason: string }>;
   pr?(sessionKey: string): Promise<string>;

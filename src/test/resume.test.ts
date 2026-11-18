@@ -1,16 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
 import { localAgents } from '../adapters/agent/local.ts';
 import { newEnvelope } from '../core/envelope.ts';
 import { SqliteStore } from '../core/store.ts';
 import type { AgentAdapter, AgentTurn } from '../adapters/agent/types.ts';
-import { ensureWorktree } from '../adapters/agent/worktree.ts';
 import { FakeIm } from './helpers.ts';
 
 const cfg = parseConfig(`
@@ -62,28 +57,4 @@ test('a turn interrupted too often is given up', async () => {
   const { turns, im } = await restart(store);
   assert.equal(turns.length, 0);
   assert.match(im.transcript().join('\n'), /interrupted 3 times/);
-});
-
-test('each session gets its own worktree and branch, reused across turns', async () => {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'ab-repo-')));
-  const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
-  git('init', '-q', '-b', 'main');
-  mkdirSync(join(repo, 'pkg'));
-  writeFileSync(join(repo, 'pkg', 'a.txt'), 'x');
-  mkdirSync(join(repo, 'node_modules'));
-  git('add', 'pkg');
-  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init');
-  const dir = join(repo, '..', `wt-${Date.now()}`);
-
-  const a = await ensureWorktree({ baseCwd: join(repo, 'pkg'), sessionKey: 'slack:C1:T1', dir, links: ['node_modules'] });
-  const b = await ensureWorktree({ baseCwd: join(repo, 'pkg'), sessionKey: 'slack:C1:T2', dir });
-  const again = await ensureWorktree({ baseCwd: join(repo, 'pkg'), sessionKey: 'slack:C1:T1', dir });
-
-  assert.ok(a.created && b.created && !again.created);
-  assert.notEqual(a.path, b.path);
-  assert.notEqual(a.branch, b.branch);
-  assert.equal(again.path, a.path);
-  assert.ok(existsSync(join(a.cwd, 'a.txt')), 'cwd maps to the same subdirectory');
-  assert.ok(existsSync(join(a.path, 'node_modules')), 'links are created');
-  assert.match(a.branch, /^bridge\/slack-c1-t1-[0-9a-f]{6}$/);
 });

@@ -7,13 +7,13 @@
  */
 
 // The bridge
-export { Bridge, type BridgeOptions } from './core/bridge.ts';
+export { Bridge, type AuditEntry, type BridgeOptions, type PendingChoice, type SessionInfo, type ToolServerInfo } from './core/bridge.ts';
 
 // Config: parse and check it, see what a change does
 export { parseConfig, checkConfig, formatIssue, ConfigError, type ConfigIssue } from './config/load.ts';
 export { configChanges, describeChanges, type ConfigChange } from './config/changes.ts';
 export { configJsonSchema } from './config/json-schema.ts';
-export type { AgentConfig, BridgeConfig, Policy, Route, RouteTest, ToolServerConfig, TrustLevel } from './config/schema.ts';
+export type { AgentConfig, BridgeConfig, Person, Policy, Route, RouteTest, ToolServerConfig, TrustLevel } from './config/schema.ts';
 
 // State
 export { SqliteStore, type BridgeStore, type QueueRow, type SessionRow, type TraceRow } from './core/store.ts';

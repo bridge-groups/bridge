@@ -15,6 +15,7 @@ people:
   me:
     trust: owner
     # slack: U0123456789      # your Slack member id
+    # feishu: ou_xxx          # your Feishu / Lark open_id (\`bridge up\` prints unknown ones)
     # telegram: "123456789"   # your Telegram user id
 
 # IM connections (outbound only; no public URL needed). Store tokens with:
@@ -23,6 +24,10 @@ im: {}
   # slack:
   #   app_token: secret:slack_app_token   # xapp-… (Socket Mode)
   #   bot_token: secret:slack_bot_token   # xoxb-…
+  # feishu:                  # see: bridge feishu setup
+  #   app_id: cli_xxx
+  #   app_secret: secret:feishu_app_secret
+  #   domain: feishu          # or lark (larksuite.com)
   # telegram:
   #   bot_token: env:TELEGRAM_BOT_TOKEN
 

@@ -17,7 +17,7 @@ export interface Worktree {
 export interface WorktreeOpts {
   baseCwd: string;
   sessionKey: string;
-  dir?: string;
+  dir: string;
   /** Untracked paths linked in from the main checkout (they never count as uncommitted work). */
   links?: string[];
 }
@@ -137,7 +137,7 @@ async function locate(opts: WorktreeOpts): Promise<Located> {
   const root = realpathSync(top);
   if (!isInside(root, base)) throw new Error(`${opts.baseCwd} is not inside its repository ${root}`);
   const slug = sessionSlug(opts.sessionKey);
-  const path = join(expandHome(opts.dir ?? '~/.bridge/worktrees'), basename(root), slug);
+  const path = join(expandHome(opts.dir), basename(root), slug);
   const cwd = join(path, relative(root, base));
   if (!isInside(path, cwd)) throw new Error(`the agent's directory would be outside its worktree ${path}`);
   return { root, path, branch: `bridge/${slug}`, cwd };
@@ -433,26 +433,36 @@ export async function removeAt(root: string, path: string, branch: string) {
   await tryGit(root, ['config', '--remove-section', `branch.${branch}`]);
 }
 
+/** The session slug a conversation branch (`bridge/<slug>`) belongs to. */
+export function branchSlug(branch: string): string {
+  return branch.replace(/^bridge\//, '');
+}
+
 /**
- * Worktrees under `opts.baseCwd`'s repo that `isIdle` (by session slug) and hold nothing unmerged.
- * Each removal runs inside `guard(slug, fn)`, which can serialize it with that conversation's turns.
- * A failing worktree is reported in `errors` and doesn't stop the others.
+ * Remove worktrees under `opts.baseCwd`'s repo that `isIdle` (by session slug) and hold nothing unmerged, or
+ * anything with `force`. Unknown (base branch gone, git failing) counts as unmerged. Each removal runs inside
+ * `guard(slug, fn)`, which can serialize it with that conversation's turns. Kept ones are listed with why; a
+ * failing worktree is reported in `errors` and doesn't stop the others.
  */
 export async function pruneIdle(
   opts: Omit<WorktreeOpts, 'sessionKey'>,
   isIdle: (slug: string) => boolean,
-  guard: (slug: string, fn: () => Promise<void>) => Promise<void> = (_slug, fn) => fn(),
-): Promise<{ removed: string[]; errors: string[] }> {
+  { guard = (_slug, fn) => fn(), force = false }: { guard?: (slug: string, fn: () => Promise<void>) => Promise<void>; force?: boolean } = {},
+): Promise<{ removed: string[]; kept: string[]; errors: string[] }> {
   const removed: string[] = [];
+  const kept: string[] = [];
   const errors: string[] = [];
   for (const wt of await listWorktrees(opts.baseCwd)) {
-    const slug = wt.branch.replace(/^bridge\//, '');
+    const slug = branchSlug(wt.branch);
     if (!isIdle(slug)) continue;
     try {
       await guard(slug, async () => {
         const st = await statusAt(wt.root, wt.path, wt.branch, opts.links);
-        // Unknown counts as unmerged: only a branch known to be empty is removed without asking.
-        if (st && (!st.commits || st.commits.length || st.dirty.length)) return;
+        if (st && (!st.commits || st.commits.length || st.dirty.length) && !force) {
+          const commits = st.commits ? String(st.commits.length) : 'unknown';
+          kept.push(`${wt.branch}  (${commits} unmerged commits, ${st.dirty.length} uncommitted files)`);
+          return;
+        }
         await removeAt(wt.root, wt.path, wt.branch);
         removed.push(wt.branch);
       });
@@ -460,7 +470,7 @@ export async function pruneIdle(
       errors.push(`${wt.branch}: ${(err as Error).message}`);
     }
   }
-  return { removed, errors };
+  return { removed, kept, errors };
 }
 
 /** Every bridge worktree of the repo containing `baseCwd`. */
@@ -482,7 +492,7 @@ export function expandHome(p: string) {
 }
 
 /** Commit subjects oldest-first as a title + bullet body (used for squash messages and PRs). */
-export function summarize(st: WorktreeStatus): { title: string; bullets: string } {
+function summarize(st: WorktreeStatus): { title: string; bullets: string } {
   const subjects = (st.commits ?? []).map((c) => c.replace(/^\S+\s/, '')).reverse();
   return { title: subjects[0] ?? st.branch, bullets: subjects.map((x) => `- ${x}`).join('\n') };
 }
@@ -534,8 +544,9 @@ export async function pushPullRequest(opts: WorktreeOpts, token: string): Promis
   try {
     const url = await run('gh', ['pr', 'view', st.branch, '--json', 'url,state', '--jq', 'select(.state == "OPEN") | .url']);
     if (url) return { url, created: false };
-  } catch {
-    /* no PR yet */
+  } catch (err) {
+    // Only "there is none yet" means opening one; anything else (auth, network) is the real failure.
+    if (!/no pull requests found/i.test((err as Error).message)) throw err;
   }
   const { title, bullets } = summarize(st);
   const body = `${bullets}\n\n---\nOpened from a chat conversation via bridge (branch \`${st.branch}\`).`;

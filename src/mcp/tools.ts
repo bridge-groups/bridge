@@ -4,7 +4,9 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpError, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { HttpToolServerConfig, ToolServerConfig } from '../config/schema.ts';
+import { isDeepStrictEqual } from 'node:util';
 import { parseDuration } from '../core/address.ts';
+import { VERSION } from '../core/version.ts';
 import { envSecrets, resolveTemplate, type SecretResolver } from '../core/secrets.ts';
 import { BridgeOAuthProvider, NeedsSignIn, type OAuthStorage } from './oauth.ts';
 
@@ -42,7 +44,7 @@ export class ToolHub {
 
   /** Forget the connection and cached tool list (e.g. after signing in again). */
   async reset(server: string) {
-    await this.discard(server);
+    await this.drop(server);
   }
 
   /** Config reload: new servers become available; changed or removed ones are disconnected. */
@@ -50,7 +52,7 @@ export class ToolHub {
     const old = this.servers;
     this.servers = servers;
     for (const name of Object.keys(old)) {
-      if (JSON.stringify(old[name]) !== JSON.stringify(servers[name])) await this.discard(name);
+      if (!isDeepStrictEqual(old[name], servers[name])) await this.drop(name);
     }
   }
 
@@ -95,7 +97,7 @@ export class ToolHub {
       return await fn(client);
     } catch (err) {
       if (err instanceof McpError) throw err; // the server answered: bad arguments, unknown tool, timeout…
-      await this.forget(server, p);
+      await this.drop(server, p);
       if (!idempotent && !neverSent(err)) throw err;
       return fn(await this.connection(server));
     }
@@ -120,21 +122,17 @@ export class ToolHub {
     return p;
   }
 
-  /** Drop this particular connection (not whatever replaced it in the meantime). */
-  private async forget(server: string, p: Promise<Client>) {
-    if (this.clients.get(server) === p) {
+  /**
+   * Disconnect a server and forget its cached tools. With `only`, just that connection: if something has
+   * replaced it in the meantime, the replacement stays and `only` is merely closed.
+   */
+  private async drop(server: string, only?: Promise<Client>) {
+    const p = only ?? this.clients.get(server);
+    if (!only || this.clients.get(server) === only) {
       this.clients.delete(server);
       this.generation.set(server, (this.generation.get(server) ?? 0) + 1);
       this.toolCache.delete(server);
     }
-    await closeQuietly(p);
-  }
-
-  private async discard(server: string) {
-    this.generation.set(server, (this.generation.get(server) ?? 0) + 1);
-    this.toolCache.delete(server);
-    const p = this.clients.get(server);
-    this.clients.delete(server);
     if (p) await closeQuietly(p);
   }
 }
@@ -152,11 +150,11 @@ function neverSent(err: unknown): boolean {
   if (err instanceof StreamableHTTPError && err.code === 404) return true; // session expired: rejected before running
   const code = (err as { cause?: { code?: string } })?.cause?.code;
   if (code === 'ECONNREFUSED') return true;
-  return /^Not connected$/.test((err as Error)?.message ?? '');
+  return (err as Error)?.message === 'Not connected';
 }
 
 function newClient() {
-  return new Client({ name: 'bridge', version: '0.1.0' });
+  return new Client({ name: 'bridge', version: VERSION });
 }
 
 /** A local server as a child process. It gets a minimal environment plus its own `env`, never the bridge's secrets. */

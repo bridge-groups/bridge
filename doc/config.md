@@ -23,7 +23,9 @@ The machine-readable schema is [bridge.schema.json](bridge.schema.json) (generat
      confirm it. Owners get Apply / Reject buttons in their direct messages with the bot. The dashboard shows
      the change too, and `bridge check --apply` confirms it from this machine.
    - the file is invalid or a test fails, so nothing changes and the bridge logs why.
-4. A restart does not skip the confirmation: the bridge starts with the config applied last, then asks again.
+4. A restart does not skip the confirmation: the bridge starts with the config applied last, then asks again. If
+   that record can't be read (a newer schema dropped a setting it has), the bridge doesn't start until
+   `bridge check --apply` confirms the file as a whole.
 
 The bridge records the text it applied in `~/.bridge/applied/`. Every applied, held or rejected change is in the
 audit trail (`bridge trace`, kind `config`). A change waits as a whole, so an edit that both removes and adds a
@@ -48,15 +50,44 @@ own change. Keep agents that run through the bridge on a permission mode and too
 shell commands (Claude Code's `permission_mode` and `allowed_tools`), or in a sandbox that keeps their writes off your
 checkout (Codex's `sandbox`: `read-only`, or `workspace-write` with `worktree: true`).
 
+## Routes
+
+A message reaches an agent only through a route (deny by default).
+
+- An IM route (`from: slack:#dev`, `slack:dm`, `slack:*`) goes to exactly one agent. A route to an agent that runs
+  on this machine (`claude-code`, `codex`, `stdio`) must name `when.sender`: a list of people, or `anyone` to opt
+  out on purpose.
+- `when.mention`: `true` (the default) needs the bot @-mentioned in a channel; a DM always counts as mentioned.
+  `false` takes every message in the channel. `<agent>` needs the mention *and* the agent's name at the start
+  (`@bot data-agent …`), so several agents can share a channel.
+- A message that starts with an agent's name (`codex fix the login`, `@bot codex …`) is for that agent only.
+- A message that names no agent stays with the agent already holding the conversation (the thread, or the DM until
+  `dm_idle_reset`): that agent's routes are tried first, and each must still match. Otherwise routes are tried top
+  to bottom and the first that matches wins. Switching agents starts the new one on a fresh session.
+- A reply in a thread the agent already holds needs no mention.
+- `reset` / `/new` starts a fresh agent session for the thread.
+- An agent route (`from: <agent>`) lists what that agent may reach: other agents, and tools as `server.tool`
+  globs.
+
+## Policies
+
+- A policy applies when every key of its `match` holds (`tool`, `agent`, `writes`); a missing key matches
+  anything. `writes: true` matches tools the server doesn't mark read-only.
+- Every applying policy counts: approvers are merged, and the shortest `timeout` (default `10m`) and the strictest
+  `max_hops` / `budget_usd` win.
+- `max_hops` and `budget_usd` belong to an agent, so they go on policies that match by `agent` only.
+- Approvers are people whose trust is not `external`. `initiator` means whoever started the conversation, but only
+  when that is such a person: for a message from someone outside `people:` (a `sender: anyone` route), the owners
+  decide instead, so nobody approves their own request.
+- `budget_usd` is per conversation; a conversation deleted by `retention` starts with a fresh budget.
+
 ## Rules a check enforces
 
-- Routing is deny-by-default and first-match, except that a message naming no agent tries the routes of the
-  agent already holding the conversation first. A route from IM to an agent that runs on this machine
-  (`claude-code`, `codex`, `stdio`) needs `when.sender`: a list of people, or `anyone` to opt out on purpose.
+Besides the routing and policy rules above:
+
 - Credentials never go in the file. Store them with `bridge secret set <name>` and write `secret:<name>`, or
   `env:NAME`; in a header write `Bearer ${secret:name}`. A value that looks like a token is an error.
 - Names of agents and tool servers use letters, digits, `-` and `_`; an agent and a tool server can't share a name.
-- `max_hops` and `budget_usd` go on policies that match by `agent` only.
 
 ## Tests
 
@@ -82,14 +113,14 @@ mentioned); `text` defaults to `hello`. To see why a message routes the way it d
 
 | Section | Holds | Notes |
 | --- | --- | --- |
-| `people` | `<id>: { trust, slack, feishu, telegram, discord }` | `trust`: `owner`, `trusted`, `member` (default), `agent`, `external`. Platform ids: Slack member id, Feishu / Lark open_id |
+| `people` | `<id>: { trust, slack, feishu, telegram }` | `trust`: `owner`, `trusted`, `member` (default), `agent`, `external`. Platform ids: Slack member id, Feishu / Lark open_id |
 | `im` | `slack`, `feishu`, `telegram` connections | Credentials as `secret:` / `env:` references; `feishu.domain`: `feishu` or `lark`. Changing them needs a restart |
 | `agents` | `<name>: { type: claude-code \| codex \| webhook \| stdio, … }` | claude-code: `cwd`, `permission_mode`, `allowed_tools`, `model`, `worktree`, `worktree_links`, `git_token`. codex: `cwd`, `sandbox`, `model`, and the same `worktree` settings. webhook: `url`, `headers`, `timeout`. stdio: `command`, `args`, `cwd`, `env`, `timeout` |
 | `tools` | `<name>: { command, args, env }` or `{ url, headers, oauth }` | MCP tool servers; `oauth: true` signs in with `bridge auth <name>` |
-| `routes` | `{ from, when, to }` | `from`: an IM address or an agent. `when`: `mention`, `listen`, `sender`. `to`: one agent (from IM), or agents and `server.tool` globs (from an agent) |
+| `routes` | `{ from, when, to }` | `from`: an IM address or an agent. `when`: `mention`, `sender`. `to`: one agent (from IM), or agents and `server.tool` globs (from an agent) |
 | `policies` | `{ match: { tool, agent, writes }, approve_by, timeout, max_hops, budget_usd }` | Every key of `match` must hold; all applying policies count and the strictest wins |
-| `defaults` | `dm_idle_reset`, `progress`, `max_hops`, `retention`, … | Housekeeping |
+| `defaults` | `dm_idle_reset`, `offline_queue_ttl`, `progress`, `max_hops`, `max_file_mb`, `files_ttl`, `worktree_prune_after`, `retention` | Housekeeping and limits |
 | `server` | `host`, `port`, `data_dir` | The dashboard and MCP hub listen on `host:port` |
 | `tests` | Assertions, see above | |
 
-[README.md](../README.md) explains each feature; the schema has every key and default.
+The schema has every key with its default and a description.

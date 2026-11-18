@@ -15,7 +15,7 @@ tools:
   warehouse: { command: x }
 routes:
   - { from: "slack:#dev", when: { mention: claude-code, sender: [alice] }, to: claude-code }
-  - { from: "slack:#claude", when: { listen: all, sender: [alice] }, to: claude-code }
+  - { from: "slack:#claude", when: { mention: false, sender: [alice] }, to: claude-code }
   - { from: "slack:#data", to: data-agent }
   - { from: "slack:dm", when: { sender: [alice, bob] }, to: claude-code }
   - { from: claude-code, to: [warehouse.query, "github.*", data-agent] }
@@ -56,7 +56,7 @@ routes:
   const at = (channelName: string, mentioned: boolean, isDM = false) => r.matchInbound(msg({ channelName, mentioned, isDM }), {})?.index;
   assert.equal(at('yes', true), 0);
   assert.equal(at('yes', false), undefined);
-  assert.equal(at('no', false), 1, 'mention: false needs no mention, like listen: all');
+  assert.equal(at('no', false), 1, 'mention: false takes every message');
   assert.equal(at('unset', true), 2);
   assert.equal(at('unset', false), undefined);
   assert.equal(at('dm', false, true), 3, 'a DM always counts as mentioned');
@@ -71,7 +71,7 @@ test('thread replies continue without a fresh mention or address', () => {
   assert.equal(router.matchInbound(msg({ mentioned: false }), { personId: 'alice', threadAgent: 'claude-code' })?.agent, 'claude-code');
 });
 
-test('listen: all needs no mention', () => {
+test('mention: false needs no mention', () => {
   assert.equal(router.matchInbound(msg({ channelName: 'claude', mentioned: false }), { personId: 'alice' })?.agent, 'claude-code');
 });
 

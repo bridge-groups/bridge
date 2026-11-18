@@ -20,7 +20,7 @@ import {
 } from './worktree.ts';
 
 /** What the bridge tells a coding agent about where it is, added to the agent's own instructions. */
-export const BRIDGE_PROMPT = `You are being reached through bridge. Messages come from people in a chat app (Slack, Telegram, …) or from other agents.
+const BRIDGE_PROMPT = `You are being reached through bridge. Messages come from people in a chat app (Slack, Telegram, …) or from other agents.
 - Your final answer is posted back to the conversation automatically.
 - Use the "bridge" MCP tools to post an interim update (send_message), ask the person a question and wait for the reply (ask_human), hand work to another agent (delegate), or call the external tools you were granted.
 - Keep chat replies short and readable; the conversation is a chat thread, not a terminal.
@@ -104,7 +104,7 @@ export abstract class CliAgent implements AgentAdapter {
   }
 
   async run(turn: AgentTurn): Promise<AgentReply> {
-    if (!this.base.worktree) return this.runIn(expandHome(this.base.cwd ?? process.cwd()), turn, BRIDGE_PROMPT, false);
+    if (!this.base.worktree) return this.runIn(expandHome(this.base.cwd ?? process.cwd()), turn, BRIDGE_PROMPT);
     const slug = sessionSlug(turn.envelope.sessionKey);
     // Under the lock, so a prune or discard can't remove the worktree between creating and using it.
     const wt = await this.locks.run(slug, async () => {
@@ -116,7 +116,7 @@ export abstract class CliAgent implements AgentAdapter {
       if (wt.notice) turn.onNotice?.(wt.notice);
       if (wt.created) turn.onNotice?.(`🌿 ${this.name} works on its own branch \`${wt.branch}\` for this conversation (${wt.path}).`);
       const instructions = `${BRIDGE_PROMPT}\n- You are working in your own git worktree (${wt.path}) on branch ${wt.branch}, separate from the user's main checkout. Stay on this branch and commit your changes here when a piece of work is done; the user merges the branch.`;
-      return await this.runIn(wt.cwd, turn, instructions, wt.created);
+      return await this.runIn(wt.cwd, turn, instructions);
     } finally {
       const n = (this.busy.get(slug) ?? 1) - 1;
       if (n) this.busy.set(slug, n);
@@ -124,9 +124,8 @@ export abstract class CliAgent implements AgentAdapter {
     }
   }
 
-  private async runIn(cwd: string, turn: AgentTurn, instructions: string, freshDir: boolean): Promise<AgentReply> {
-    const prev = turn.agentSessionId ? decodeSessionId(turn.agentSessionId) : undefined;
-    const resume = prev && (prev.dir !== undefined ? prev.dir === dirTag(cwd) : !freshDir) ? prev.id : undefined;
+  private async runIn(cwd: string, turn: AgentTurn, instructions: string): Promise<AgentReply> {
+    const resume = turn.agentSessionId && resumableIn(turn.agentSessionId, cwd);
     const inv = this.invocation(cwd, turn, instructions, resume);
     try {
       return await this.spawnTurn(cwd, inv, turn);
@@ -210,16 +209,16 @@ export abstract class CliAgent implements AgentAdapter {
 
 /**
  * CLIs keep their sessions per directory, so the session id the bridge stores also names the
- * directory the session ran in: `<session id>@<dir tag>`. A session is resumed only in
- * the same directory (ids without a tag come from older versions: resumed unless the worktree is new).
+ * directory the session ran in: `<session id>@<dir tag>`. A session is resumed only in the same directory.
  */
 function encodeSessionId(id: string, cwd: string): string {
   return `${id}@${dirTag(cwd)}`;
 }
 
-function decodeSessionId(stored: string): { id: string; dir?: string } {
+/** The CLI's session id in `stored`, if it ran in `cwd`. */
+function resumableIn(stored: string, cwd: string): string | undefined {
   const at = stored.lastIndexOf('@');
-  return at < 0 ? { id: stored } : { id: stored.slice(0, at), dir: stored.slice(at + 1) };
+  return at > 0 && stored.slice(at + 1) === dirTag(cwd) ? stored.slice(0, at) : undefined;
 }
 
 const dirTag = (cwd: string) => createHash('sha1').update(cwd).digest('hex').slice(0, 12);
@@ -346,7 +345,7 @@ class WorktreeWorkspace implements Workspace {
   }
 
   prune(isIdle: (slug: string) => boolean) {
-    return pruneIdle(this.opts(''), isIdle, this.pruneGuard);
+    return pruneIdle(this.opts(''), isIdle, { guard: this.pruneGuard });
   }
 
   discard(key: string) {
@@ -367,7 +366,6 @@ function describe(st: WorktreeStatus): string {
   }
   if (st.diffstat) lines.push(fence(st.diffstat));
   if (st.dirty.length) lines.push(`Uncommitted: ${st.dirty.map((d) => d.slice(3)).join(', ')}`);
-  lines.push('Reply `merge` to squash it into the base branch, `pr` to open a pull request, or `discard` to throw it away.');
   return lines.join('\n');
 }
 

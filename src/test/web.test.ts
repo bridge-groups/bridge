@@ -7,7 +7,7 @@ import { Bridge } from '../core/bridge.ts';
 import { handleWeb } from '../web/api.ts';
 import { SqliteStore } from '../core/store.ts';
 import { memoryStorage } from '../mcp/oauth.ts';
-import { FakeIm } from './helpers.ts';
+import { FakeIm, until } from './helpers.ts';
 
 async function setup() {
   const calls: string[] = [];
@@ -17,6 +17,7 @@ async function setup() {
     merge: async () => (calls.push('merge'), '✅ merged'),
     previewDiscard: async () => '1 unmerged commit',
     discard: async () => (calls.push('discard'), '🗑 discarded'),
+    prune: async () => ({ removed: [], errors: [] }),
   };
   const cc: AgentAdapter = { name: 'cc', workspace: ws, async run() { return { text: 'done', agentSessionId: 's1' }; } };
   const cfg = parseConfig(`
@@ -28,7 +29,7 @@ routes: [ { from: "slack:*", when: { sender: [alice, bob] }, to: cc } ]
 `);
   const im = new FakeIm();
   // Like the CLI: the dashboard is mounted next to the bridge's own routes.
-  const bridge: Bridge = new Bridge({ extraRoutes: (req, res, url) => handleWeb(bridge, req, res, url), cfg, store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['cc', cc]]), oauthStorage: memoryStorage(), log: () => {} });
+  const bridge: Bridge = new Bridge({ extraRoutes: (req, res, url) => handleWeb({ bridge, owner: () => 'alice' }, req, res, url), cfg, store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['cc', cc]]), oauthStorage: memoryStorage(), log: () => {} });
   const { mcpUrl: base } = await bridge.start();
   const get = async (path: string) => (await fetch(base + path)).json() as Promise<any>;
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -46,10 +47,7 @@ test('dashboard: page, overview, deciding a pending choice as the owner', async 
 
     im.receive({ userId: 'U1', text: 'merge' }); // asks "yes?" and waits
     let overview: any;
-    for (let i = 0; i < 50 && !overview?.choices.length; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-      overview = await get('/api/overview');
-    }
+    await until(async () => (overview = await get('/api/overview')).choices.length > 0, 'the confirmation to be listed');
     const [choice] = overview.choices;
     assert.equal(choice.text, 'Squash 1 commit into main');
     assert.deepEqual(choice.choices.map((c: any) => c.value), ['merge', 'cancel']);
@@ -85,7 +83,7 @@ test('dashboard: conversations with branches, discard from the web, activity tra
     const done = await (await post('/api/sessions/discard', { key })).json();
     assert.equal(done.text, '🗑 discarded');
     assert.deepEqual(calls, ['discard']);
-    assert.match(im.transcript().join('\n'), /🗑 discarded\n_\(from the dashboard, by alice\)_/);
+    assert.match(im.transcript().join('\n'), /🗑 discarded\n_\(by alice, via web\)_/);
 
     const trace = await get(`/api/trace?session=${encodeURIComponent(key)}`);
     assert.deepEqual(trace.map((t: any) => t.kind).slice(0, 2), ['discarded', 'reply']);

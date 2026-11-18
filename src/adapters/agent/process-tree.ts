@@ -9,7 +9,7 @@ export const KILL_GRACE_MS = 5000;
  * command in a group of its own, so signalling the agent's group alone would miss them. A process that detached
  * itself (`nohup … &` whose parent has exited, `setsid`) is no longer a descendant and is not found.
  */
-export async function processGroups(pid: number): Promise<number[]> {
+async function processGroups(pid: number): Promise<number[]> {
   const table = await new Promise<string>((resolve) =>
     // Without a process table only the agent's own group (it is spawned detached, so the group id is its pid) is known.
     execFile('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { timeout: 2000, maxBuffer: 16 * 1024 * 1024 }, (err, out) => resolve(err ? '' : out)),

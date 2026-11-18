@@ -2,19 +2,13 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { Readable } from 'node:stream';
 import type { InboundFile, InboundMessage } from '../../core/router.ts';
 import { toFeishuMarkdown } from './feishu-format.ts';
+import { channelNames } from './names.ts';
 import type { Choice, ImAdapter, InboundAction, OutboundMessage } from './types.ts';
 
 /**
  * Feishu (飞书) or Lark over the long connection (outbound WebSocket, no public URL).
  * Replies are message cards, so progress can be edited in place and approvals get buttons.
- *
- * App setup (open.feishu.cn / open.larksuite.com → self-built app):
- *  - Features: Bot.
- *  - Scopes: im:message, im:message:send_as_bot, im:message.p2p_msg:readonly,
- *    im:message.group_at_msg:readonly, im:resource, im:chat:readonly
- *    (+ im:message.group_msg for routes with `listen: all`).
- *  - Events & callbacks: subscription mode "long connection"; event im.message.receive_v1;
- *    callback card.action.trigger.
+ * The app it needs (scopes, events, callbacks) is described by `bridge feishu setup`.
  */
 export class FeishuAdapter implements ImAdapter {
   readonly platform = 'feishu';
@@ -22,7 +16,7 @@ export class FeishuAdapter implements ImAdapter {
   private readonly client: lark.Client;
   private readonly ws: lark.WSClient;
   private botOpenId = '';
-  private readonly chatNames = new Map<string, string>();
+  private readonly chatName = channelNames(async (id) => (await this.client.im.chat.get({ path: { chat_id: id } }))?.data?.name);
 
   constructor(opts: { appId: string; appSecret: string; domain?: 'feishu' | 'lark' }) {
     const domain = opts.domain === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu;
@@ -40,15 +34,16 @@ export class FeishuAdapter implements ImAdapter {
 
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
-        const msg = await this.parse(data).catch(() => undefined);
+        // Thrown here, the SDK would only log it at debug level: the message would vanish without a trace.
+        const msg = await this.parse(data).catch((err) => console.error(`feishu: message not read: ${(err as Error).message}`));
         if (msg) onMessage(msg);
       },
       'card.action.trigger': async (data: any) => {
         const value = data?.action?.value?.v;
-        const messageId = data?.context?.open_message_id ?? data?.open_message_id;
+        const messageId = data?.context?.open_message_id;
         const userId = data?.operator?.open_id;
         if (typeof value === 'string' && messageId && userId && onAction) {
-          onAction({ platform: 'feishu', channelId: data?.context?.open_chat_id ?? data?.open_chat_id ?? '', userId, messageId, value });
+          onAction({ platform: 'feishu', channelId: data?.context?.open_chat_id ?? '', userId, messageId, value });
         }
         return {};
       },
@@ -57,7 +52,7 @@ export class FeishuAdapter implements ImAdapter {
   }
 
   async stop() {
-    (this.ws as unknown as { close?: () => void }).close?.();
+    this.ws.close();
   }
 
   async send(msg: OutboundMessage): Promise<string> {
@@ -190,18 +185,6 @@ export class FeishuAdapter implements ImAdapter {
     };
   }
 
-  private async chatName(chatId: string): Promise<string> {
-    const cached = this.chatNames.get(chatId);
-    if (cached) return cached;
-    try {
-      const res = await this.client.im.chat.get({ path: { chat_id: chatId } });
-      const name = res?.data?.name || chatId;
-      this.chatNames.set(chatId, name);
-      return name;
-    } catch {
-      return chatId;
-    }
-  }
 }
 
 /** A card with one markdown block, plus optional buttons or an outcome note. */

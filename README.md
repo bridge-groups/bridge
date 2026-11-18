@@ -1,35 +1,35 @@
 # bridge
 
-Connects **agents ↔ IM**, **agents ↔ agents** and **agents ↔ tools**. Two ways to run it:
+Connects **agents ↔ IM**, **agents ↔ agents** and **agents ↔ tools**. Chat messages from Slack, Feishu / Lark or
+Telegram reach agents such as Claude Code or Codex; each agent turn can post updates, ask a person, hand work to
+another agent and call the tool servers its routes allow; policies decide approvals and budgets; everything lands
+in an audit trail with secrets redacted.
 
-- **The `bridge` command** on your own machine: one process driven by a single `bridge.yaml`, secrets in the OS keychain, a local dashboard. Most of this README is about it.
-- **The library**, `@bridge-groups/bridge`, embedded in an app or service that keeps users' configuration and secrets itself, with one bridge per user if it serves several. See [doc/library.md](doc/library.md).
+- **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound, so you need no public URL.
+  Telegram (long polling) is written but not yet tested against the real service.
+- **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON
+  lines ([doc/agents.md](doc/agents.md)).
+- **Tools**: MCP servers, local or remote. The bridge holds the credentials and gives each agent only what its
+  routes allow.
+- **Deny by default**: a message reaches an agent only through a route, and every message, tool call and approval
+  is recorded.
 
-- **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound so you need no public URL. Telegram (long polling) is written but not yet tested against the real service.
-- **Agents**: Claude Code (headless `claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON lines.
-- **Tools**: external MCP servers. The bridge connects to them with its own credentials and gives each agent only what its routes allow, with approvals where policies say so.
-- **Everything is routed and audited**: routes are first-match and deny-by-default, and every message, tool call and approval lands in a SQLite trace with secrets redacted.
-
-Each agent turn gets a session-scoped MCP endpoint (`/mcp/<token>`, or `/mcp` with `Authorization: Bearer <token>`) with these tools:
-
-| tool | what it does |
-|---|---|
-| `send_message` | post an interim update to the thread being answered (only that thread) |
-| `ask_human` | ask the initiator a question in the thread and wait for the reply |
-| `delegate` | hand a task to another agent the routes allow; trust drops to `agent`, hops +1 |
-| `<server>__<tool>` | a proxied external tool, if routed, after approval if a policy requires it |
+This README is about the `bridge` command, for your own machine: one process, one `bridge.yaml`, secrets in the OS
+keychain, a local dashboard. To embed the bridge in an app or service instead, use the library
+`@bridge-groups/bridge` ([doc/library.md](doc/library.md)).
 
 ## Quick start
 
+Needs Node 24 or later.
+
 ```bash
-npm install && npm run build
-node out/cli.js init            # writes bridge.yaml with a local echo agent
-node out/cli.js check           # problems with line numbers, the file's tests, what an edit changes
-node out/cli.js doctor
-node out/cli.js chat --as me    # talk to your routes from the terminal
+npm install && npm run build && npm link   # puts `bridge` on your PATH
+bridge init              # writes bridge.yaml with a local echo agent
+bridge check             # problems with line numbers, the file's tests, what an edit changes
+bridge chat --as me      # talk to your routes from the terminal
 ```
 
-Then add an IM and a real agent:
+Then add an IM, a real agent and a tool server:
 
 ```yaml
 people:
@@ -41,68 +41,73 @@ agents:
   data-agent:  { type: webhook, url: http://localhost:8080/agent }
 tools:
   github: { url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ${secret:github_token}" } }
-  files:  { command: npx, args: ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"] }
 routes:
-  - from: slack:#dev
-    when: { sender: [alice] }
-    to: claude-code
-  - from: slack:#data
-    to: data-agent
-  - from: claude-code
-    to: [github.*, data-agent]
+  - { from: slack:#dev, when: { sender: [alice] }, to: claude-code }
+  - { from: slack:#data, to: data-agent }
+  - { from: claude-code, to: [github.*, data-agent] }
 policies:
-  - match: { tool: "github.*", writes: true }   # every GitHub tool not marked read-only
-    approve_by: [initiator]
-    timeout: 10m
-  - match: { agent: "*" }
-    max_hops: 4
-    budget_usd: 2
+  - { match: { tool: "github.*", writes: true }, approve_by: [initiator] }   # every GitHub tool not marked read-only
+  - { match: { agent: "*" }, budget_usd: 2 }
 ```
 
 ```bash
-node out/cli.js slack manifest               # paste at api.slack.com/apps → From a manifest; the app is named "Bridge"
-node out/cli.js secret set slack_app_token   # macOS keychain; elsewhere export BRIDGE_SECRET_SLACK_APP_TOKEN
-node out/cli.js routes explain --from slack:#dev --sender alice --mention
-node out/cli.js up
+bridge secret set slack_app_token   # macOS keychain; elsewhere export BRIDGE_SECRET_SLACK_APP_TOKEN
+bridge doctor                       # config, secrets, agents and tool servers
+bridge up
 ```
 
-Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `deny` / `yes` also work). A `budget_usd` policy is a per-conversation cap: each turn is started with only what is left (Claude Code gets it as `--max-budget-usd`). Codex reports tokens rather than dollars, so budgets don't limit `codex` agents. Agents check their cap between model requests, so a turn can end up to one request over it; to keep that from happening, a turn starts only when what is left covers the agent's cheapest recent turn. A refused turn is answered in the chat and recorded in the audit trail as `budget`.
+## Changing bridge.yaml
 
-`bridge.yaml` is hot-reloaded. An agent whose settings changed gets a new process for its next turn; turns already running finish on the old one. Changing IM credentials needs a restart.
+You, or a coding agent, edit the file; a running bridge applies it on save. Edits that widen access (a new route or
+person, a changed command, a removed policy) wait until an owner confirms them: Apply / Reject in each owner's DM
+with the bot, on the dashboard, or `bridge check --apply` on this machine. Routing rules, policies, what counts as
+widening, and the `tests` a file can carry are in [doc/config.md](doc/config.md).
 
-You, or a coding agent, edit `bridge.yaml` directly; there are no config-editing commands. `node out/cli.js check` lists every problem with its line, runs the file's `tests` (assertions such as "a stranger in #dev reaches no agent"), and shows what the edit changes against the running config. Edits that only narrow access apply on save. Edits that widen it (a new route or person, a changed agent, a removed policy) wait for an owner: Apply / Reject buttons in each owner's DM with the bot, the dashboard, or `node out/cli.js check --apply` on this machine. The schema is in [doc/bridge.schema.json](doc/bridge.schema.json); the details, including what counts as widening, are in [doc/config.md](doc/config.md).
+An agent whose settings changed gets a new process for its next turn; turns already running finish on the old one.
+Changing IM credentials needs a restart.
 
-### Feishu / Lark
+## IM
 
-```bash
-node out/cli.js feishu setup   # app name ("Bridge"), features, scopes to import, events and callbacks to subscribe
-```
+- **Slack**: `bridge slack manifest` prints the app manifest (the app is named "Bridge"); paste it at
+  api.slack.com/apps → From a manifest. Store the app-level token (`xapp-…`) and the bot token (`xoxb-…`) with
+  `bridge secret set`.
+- **Feishu / Lark**: `bridge feishu setup` lists the app's features, the scopes to import, and the events and
+  callbacks to subscribe. Replies are message cards; headings and tables are rewritten for card markdown. People are
+  mapped by open_id (`people: { alice: { feishu: ou_xxx } }`); `bridge up` prints the open_id of anyone it ignores.
 
-Replies are message cards (progress edits in place, approval buttons); headings and tables are rewritten for card markdown. People are mapped by open_id: `people: { alice: { feishu: ou_xxx } }` — `up` prints the open_id of anyone it ignores.
+Approvals and confirmations are buttons where the IM has them; typing `approve` / `deny` / `yes` also works.
+Progress shows in a placeholder message that is edited as the agent works (`defaults.progress`: `collapsed`,
+`verbose` or `off`).
 
-### Attachments
+Files and images sent with a message are downloaded to `<data_dir>/files/<conversation>/` (up to `max_file_mb`,
+default 20) and handed to the agent as local paths. Slack needs the `files:read` scope.
 
-Files and images sent with a message are downloaded to `<data_dir>/files/<conversation>/` (up to `max_file_mb`, default 20) and handed to the agent as local paths; Claude Code is given read access to that folder. They are deleted after `files_ttl` (default 7d). Slack needs the `files:read` scope.
+## Agents
 
-### History
+- **claude-code** runs `claude -p` per turn and resumes the conversation's Claude session. `permission_mode` and
+  `allowed_tools` decide what it may do without asking.
+- **codex** runs `codex exec --json` per turn and resumes the conversation's Codex session. `sandbox`
+  (`read-only`, `workspace-write` (default: write in the working directory, no network) or `danger-full-access`)
+  bounds its commands; nobody is asked to approve one, so what the sandbox refuses fails. It uses your own
+  `~/.codex` login and config.
+- **webhook** and **stdio** agents speak the protocol in [doc/agents.md](doc/agents.md); see
+  [src/examples/echo-agent.mjs](src/examples/echo-agent.mjs).
 
-Every few hours the bridge deletes audit-trail entries older than `retention` and conversations idle for longer than that (default 30d, `off` keeps them; a deleted conversation starts afresh, with a fresh budget), and finished queue entries older than `offline_queue_ttl`.
+A `budget_usd` policy caps what a conversation may spend: each turn starts with only what is left (Claude Code gets
+it as `--max-budget-usd`), and a turn starts only when that covers the agent's cheapest recent turn. Codex reports
+tokens, not dollars, so budgets don't limit `codex` agents.
 
-### Run it in the background (macOS)
+When a turn is stopped or the bridge shuts down, the agent and the commands it runs get SIGTERM and, 5 seconds later,
+SIGKILL (a process an agent deliberately detached, such as `nohup … &`, is not tracked). A turn cut off by a restart
+resumes in the same agent session, at most twice.
 
-```bash
-node out/cli.js service install   # LaunchAgent: starts at login, restarted if it exits
-node out/cli.js service status
-node out/cli.js service uninstall
-```
+### A branch per conversation
 
-Logs go to `~/Library/Logs/bridge/bridge.log` (launchd can't write into `~/Documents`). The service starts with a bare environment, so `install` refuses a config that uses `env:` references or names secrets missing from the keychain. When the bridge shuts down or a Claude Code or Codex turn is stopped, the agent processes and the commands they run get SIGTERM and, 5 seconds later, SIGKILL (a process an agent deliberately detached, such as `nohup … &`, is not tracked). A turn cut off by a restart resumes in the same agent session (at most twice), and anything queued while the bridge was down runs when it comes back, within `offline_queue_ttl`.
+With `worktree: true` on a `claude-code` or `codex` agent (git 2.38 or later), each conversation gets its own git
+worktree under `worktree_dir` on branch `bridge/<conversation>`, so two threads never edit the same checkout.
+`worktree_links` links untracked things like `node_modules` from the main checkout (and excludes them from git).
 
-### Parallel conversations on one repo
-
-With `worktree: true` on a `claude-code` or `codex` agent (needs git 2.38 or later), each conversation gets its own git worktree under `worktree_dir` on branch `bridge/<conversation>`, so two threads never edit the same checkout. Use `worktree_links` to link untracked things like `node_modules` from the main checkout; they are added to the repository's `.git/info/exclude`, so an agent's `git add -A` never commits the links.
-
-Finish a conversation's branch from the thread itself (a message that is exactly the word):
+Finish a conversation's branch from the thread itself, with a message that is exactly the word:
 
 | say | does |
 |---|---|
@@ -111,95 +116,77 @@ Finish a conversation's branch from the thread itself (a message that is exactly
 | `discard` / `丢弃` | removes the worktree and branch (asks first if that would lose commits or changes) |
 | `pr` / `开pr` | pushes the branch to `origin` and opens a pull request into the base (or reports the open one); needs `git_token` on the agent |
 
-The base is whatever the main checkout had checked out when the conversation started; merge requires the main checkout to be on that branch with no uncommitted changes. The squash commit is built without touching the checkout and then fast-forwarded, so a conflict or a failing commit (signing, identity) changes nothing; commit hooks don't run again for it. Merge and `pr` refuse a branch that changes a linked path or a path your main checkout ignores. If the base branch was deleted or renamed, commits are counted from where the branch started; when even that is unknown, the branch is never pruned and `discard` asks first.
+The base is whatever the main checkout had checked out when the conversation started; merge requires the main
+checkout to be on that branch with no uncommitted changes. The squash commit is built without touching the checkout
+and then fast-forwarded, so a conflict or a failing commit (signing, identity) changes nothing; commit hooks don't
+run again for it. Merge and `pr` refuse a branch that changes a linked path or a path your main checkout ignores. If
+the base branch was deleted or renamed, commits are counted from where the branch started; when even that is
+unknown, the branch is never pruned and `discard` asks first.
 
-```bash
-node out/cli.js worktrees                          # every conversation branch, with unmerged work
-node out/cli.js worktrees prune --older-than 7d    # remove idle ones with nothing unmerged (--force for all)
-```
-
-## Routing rules
-
-- An IM route goes to exactly one agent. A route to an agent that runs on this machine (`claude-code`, `codex`, `stdio`) must name `when.sender`, or say `sender: anyone` explicitly.
-- In channels the bot must be @-mentioned, unless `listen: all`. A reply in a thread the agent already holds continues it without a mention. DMs need no mention.
-- `@bot data-agent …` addresses an agent by name when one channel has several (in a DM, just `data-agent …`).
-- A message that names no agent stays with the agent already holding the conversation (the thread, or the DM until `dm_idle_reset`): that agent's routes are tried first, and each must still match. Otherwise the first matching route wins. Switching agents starts the new agent on a fresh session.
-- `when.mention` makes it explicit: `true` needs the mention (a DM counts as one), `false` needs none (like `listen: all`), and `<agent>` needs the mention *and* the agent's name at the start (`@bot data-agent …`), so several agents can share a channel without catching each other's messages.
-- An agent route (`from: <agent>`) lists what that agent may reach: other agents, and tools as `server.tool` globs.
-- `reset` / `/new` starts a fresh agent session for the thread. A DM session resets after `dm_idle_reset`.
-
-## Policies
-
-- A policy applies when every key of its `match` holds (`tool`, `agent`, `writes`); a missing key matches anything. Every applying policy counts: approvers are merged, the shortest `timeout` and the strictest `max_hops` / `budget_usd` win.
-- `max_hops` and `budget_usd` belong to an agent, so they go on policies that match by `agent` only.
-- Approvers are people from `people:` whose trust is not `external`. `initiator` means whoever started the conversation, but only when that is such a person: for a message from someone outside `people:` (a `sender: anyone` route), the owners decide instead, so nobody can approve their own request.
-- The approval message shows the tool's arguments in full; where buttons need it to fit one message, long arguments are cut with a note, and the dashboard's Activity shows all of them.
+`bridge worktrees` lists every conversation branch with its unmerged work; `bridge worktrees prune` removes the ones
+idle for `--older-than` (default 7d) with nothing unmerged, and `--force` removes them even with unmerged work.
 
 ## Tool servers
 
-- **Local** (`command`, `args`, `env`): the bridge starts the MCP server as a child process and talks stdio. The child gets a minimal environment plus its own `env` — never the bridge's secrets.
-- **Remote** (`url`, `headers`): Streamable HTTP, falling back to the older SSE transport (`transport: auto | streamable-http | sse`). A header value can be a whole secret ref (`secret:x`, `env:X`) or contain `${secret:x}` / `${env:X}`, e.g. `"Bearer ${secret:github_token}"`. Servers that sign in with OAuth take `oauth: true` instead (below).
-- **OAuth** (`url`, `oauth: true`): run `bridge auth <server>` once, or press **Connect** in the dashboard. The browser opens the provider's consent page and comes back to `http://127.0.0.1:7377/oauth/callback`; the bridge registers itself (dynamic client registration), uses PKCE, keeps the tokens in the OS keychain and refreshes them. A tool call never opens a browser: when the grant is gone it fails with "not signed in — run bridge auth <server>". Providers without dynamic registration need a pre-registered app: `oauth: { client_id: …, client_secret: secret:…, scopes: [...] }`. `bridge auth` lists sign-in state; `--sign-out` forgets the tokens.
-- `timeout` (default `5m`) bounds one tool call; progress notifications from the server extend it.
-- A dropped connection or expired remote session is reconnected. Read-only tools are retried on the new connection; a tool that may write is retried only if the request never reached the server, so a write never runs twice. `bridge doctor` lists each server's tools.
+- **Local** (`command`, `args`, `env`): the bridge starts the MCP server and talks stdio. The child gets a minimal
+  environment plus its own `env`, never the bridge's secrets.
+- **Remote** (`url`, `headers`): Streamable HTTP, falling back to the older SSE transport
+  (`transport: auto | streamable-http | sse`). A header value can be a whole secret reference (`secret:x`, `env:X`)
+  or contain `${secret:x}` / `${env:X}`.
+- **OAuth** (`url`, `oauth: true`): run `bridge auth <server>` once, or press **Connect** on the dashboard. The
+  browser comes back to `http://127.0.0.1:7377/oauth/callback`; the bridge registers itself (dynamic client
+  registration), uses PKCE, keeps the tokens in the keychain and refreshes them. A tool call never opens a browser.
+  Providers without dynamic registration need a registered app:
+  `oauth: { client_id: …, client_secret: secret:…, scopes: [...] }`. `bridge auth` lists sign-in state;
+  `--sign-out` forgets the tokens.
+
+`timeout` (default `5m`) bounds one tool call; progress notifications from the server extend it. A dropped
+connection is reconnected: read-only tools are retried, and a tool that may write is retried only if the request
+never reached the server, so a write never runs twice.
+
+## Running in the background (macOS)
+
+```bash
+bridge service install    # LaunchAgent: starts at login, restarted if it exits
+bridge service restart    # after rebuilding (npm run build)
+bridge service status
+bridge service uninstall
+```
+
+Logs go to `~/Library/Logs/bridge/bridge.log`. The service starts with a bare environment, so `install` refuses a
+config that uses `env:` references or names secrets missing from the keychain. Messages that arrive while the bridge
+is down run when it is back, within `offline_queue_ttl` (default 24h).
+
+Housekeeping runs a minute after start and then every 6 hours. It deletes:
+- attachments older than `files_ttl` (default 7d);
+- idle conversation worktrees with nothing unmerged, after `worktree_prune_after` (default 7d, `off` keeps them);
+- audit-trail entries older than `retention`, and conversations idle that long (default 30d, `off` keeps them). A
+  deleted conversation starts afresh, with a fresh budget.
 
 ## Dashboard
 
-`bridge dashboard` opens `http://127.0.0.1:7377/` (served by the running bridge, to this machine only):
+`bridge dashboard` opens `http://127.0.0.1:7377/`, served by the running bridge to this machine only:
 
-- **Waiting for you**: pending approvals and confirmations, with their buttons. You decide as the config's `owner`, the same as answering in the chat.
-- **Conversations**: each session with its agent, cost, activity and branch; merge or discard a branch (shows what it will do first, waits for any running turn, and posts the result to the chat thread).
-- **Activity**: the audit trail, for everything or one conversation.
+- **Waiting for you**: pending approvals, confirmations and config changes. You decide as the config's first owner.
+- **Conversations**: each with its agent, cost, activity and branch; merge or discard a branch (it shows what will
+  happen first, waits for any running turn, and posts the result to the thread).
+- **Activity**: the audit trail, for everything or one conversation, with every tool argument in full.
 - **Tool servers**: reachable or not, tool counts, OAuth Connect / Sign out.
 
-Writes must be same-origin JSON and requests must carry a loopback `Host`, so other web pages and DNS-rebinding tricks can't drive it.
-
-## Agent protocols
-
-**Codex**: `codex exec --json` per turn, resuming the conversation's Codex session. `sandbox` (default `workspace-write`: write in the working directory, no network; or `read-only`, `danger-full-access`) bounds its commands; nobody is asked to approve one, so what the sandbox refuses fails. The bridge's MCP endpoint and instructions are passed with `-c`; the turn's token goes in the environment, not on the command line. Codex uses your own `~/.codex` login and config, including the MCP servers listed there.
-
-**Webhook**: `POST <url>` with `{"type":"turn","text","session_id","budget_usd","envelope","mcp":{"url"}}` (`budget_usd` is what is left of the conversation budget, or null). Respond with `{"text","session_id"?,"cost_usd"?}`, or with `text/event-stream` to report progress while working: each event's `data` is one of the stdio agent's messages without `id` (`{"type":"progress","text"}`, `{"type":"session","session_id"}`, then `{"type":"reply",…}` or `{"type":"error","message"}`). The agent's `timeout` covers the whole stream; stopping the turn closes it.
-
-**stdio**: a long-running process. The bridge writes `{"type":"turn","id",…}` lines to it, and it writes back `{"type":"progress","id","text"}`, `{"type":"reply","id","text","session_id"?,"cost_usd"?}` or `{"type":"error","id","message"}`. When a turn is stopped or gets no reply within the agent's `timeout` (default `30m`), the bridge writes `{"type":"cancel","id"}` and ignores anything that comes back for that id. See [src/examples/echo-agent.mjs](src/examples/echo-agent.mjs).
-
-Both kinds get the MCP URL, so any agent with an MCP client can use `send_message`, `ask_human`, `delegate` and the granted tools.
-
-## Layout
-
-```
-src/
-  index.ts               the library's entry point (@bridge-groups/bridge)
-  local.ts               opt-in local agents (@bridge-groups/bridge/local)
-  cli.ts                 commands
-  secrets.ts             the CLI's keychain secrets; keychain-oauth.ts keeps OAuth tokens there
-  config/                schema (zod), checks with line numbers, tests, change review (what widens access)
-  core/router.ts         first-match routing, explain, outbound grants
-  core/policy.ts         approvals, max hops, budgets
-  core/bridge.ts         inbound → queue → agent turn → reply; MCP tool backend
-  core/store.ts          BridgeStore interface; SqliteStore: sessions, queue, trace
-  core/secrets.ts        SecretResolver: how the embedding app hands the bridge its secrets
-  core/redact.ts         Redactor: keeps credentials out of the trace, one per bridge
-  mcp/hub.ts             per-turn MCP endpoints over streamable HTTP (mounted wherever the app serves the bridge)
-  mcp/tools.ts           external MCP tool servers (stdio or HTTP)
-  mcp/oauth.ts           OAuth sign-in for remote tool servers (browser flow)
-  web/                   the CLI's local dashboard: JSON API + one self-contained page
-  adapters/im/           slack, feishu / lark, telegram, local console
-  adapters/agent/        webhook (remote); claude-code, codex and stdio (local, opt-in)
-  examples/              example agents
-  test/                  tests, helpers, fixtures
-doc/                     documentation and reference files
-```
-
-Contributing: see [AGENTS.md](AGENTS.md).
+Writes must be same-origin JSON and requests must carry a loopback `Host`, so other web pages and DNS-rebinding
+tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` show the same from the terminal.
 
 ## Not in v0.1 yet
 
-- Discord adapter; Telegram tested end to end
+- Discord; Telegram tested against the real service
 - A2A
-- Strict policy on `tainted` envelopes (today the flag only keeps `initiator` from approving)
-- A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP events, per-user isolation and limits, agents that run user code in sandboxes
+- A stricter policy for messages from outside `people:` (today such a sender can't approve their own request)
+- A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP
+  events, per-user isolation and limits, agents that run user code in sandboxes
 
 ## Not planned
 
-- Config-editing commands (`add`, `link`, `allow`, `grant`): you or a coding agent edit `bridge.yaml` directly.
-- A cloud relay, and bridges on several machines sharing one bot: the `bridge` command runs on your own machine.
+- Commands that edit `bridge.yaml`: you or a coding agent edit the file directly.
+- A cloud relay, or bridges on several machines sharing one bot: the `bridge` command runs on your own machine.
+
+Contributing: see [AGENTS.md](AGENTS.md).

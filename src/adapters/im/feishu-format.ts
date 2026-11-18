@@ -1,4 +1,4 @@
-import { cells, isTableRow, isTableSeparator, plain } from './slack-format.ts';
+import { cells, headingText, isTableRow, isTableSeparator, plain } from './markdown.ts';
 
 /**
  * Standard Markdown (what agents write) → Feishu/Lark card markdown.
@@ -42,9 +42,9 @@ export function toFeishuMarkdown(md: string): string {
       continue;
     }
 
-    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
-    if (heading) {
-      out.push(`**${heading[1]!.replace(/\*\*|__/g, '')}**`);
+    const heading = headingText(line);
+    if (heading !== undefined) {
+      out.push(`**${heading}**`);
       continue;
     }
     out.push(line);

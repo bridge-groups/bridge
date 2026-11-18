@@ -9,7 +9,8 @@ secrets itself. The `bridge` command is one such app, for your own machine.
 | `@bridge-groups/bridge` | `Bridge`, config parsing and checks (`parseConfig`, `checkConfig`, `configChanges`), `SqliteStore` and the `BridgeStore` interface, `Redactor`, `envSecrets`, IM adapters (Slack, Feishu / Lark, Telegram), `WebhookAgent`, `ToolHub`, OAuth storage |
 | `@bridge-groups/bridge/local` | `localAgents`: Claude Code and Codex (with git worktrees) and stdio agents, which run code on this machine; `LocalConsoleAdapter` |
 
-Nothing in the main entry point reads a config file, the OS keychain or the local dashboard; a test keeps it that way.
+Nothing in the main entry point reads a config file, the OS keychain or the CLI's dashboard; a test keeps it that
+way. Agents the app runs itself speak the protocol in [agents.md](agents.md).
 
 ## Embedding
 
@@ -39,10 +40,10 @@ server.on('request', async (req, res) => {
 await bridge.start();
 ```
 
-- **Paths.** Under `mcpBaseUrl` the bridge serves `/mcp/<token>`, one endpoint per agent turn, and
-  `/oauth/callback`. Starting an OAuth sign-in is not an HTTP route: call `bridge.oauth.start(server)` behind
-  your own authentication and send the user to the URL it returns. Without `mcpBaseUrl` the bridge listens on
-  `cfg.server.host:port` itself; `extraRoutes` adds routes there (the CLI's dashboard).
+- **Paths.** Under `mcpBaseUrl` the bridge serves `/mcp/<token>` (or `/mcp` with the token as a bearer), one
+  endpoint per agent turn, and `/oauth/callback`. Starting an OAuth sign-in is not an HTTP route: call
+  `bridge.oauth.start(server)` behind your own authentication and send the user to the URL it returns. Without
+  `mcpBaseUrl` the bridge listens on `cfg.server.host:port` itself; `extraRoutes` adds routes there.
 - **Secrets.** `secrets` resolves every `secret:` / `env:` reference the bridge meets (default: `envSecrets()`,
   the environment only). Every value it returns is redacted from that bridge's audit trail.
 - **Agents.** By default only remote agents (`webhook`) are built from the config. Pass
@@ -55,7 +56,25 @@ await bridge.start();
   restart).
 - **Config changes.** `bridge.reload(cfg)` applies a new config without dropping IM connections. To hold back
   changes that widen access, as the CLI does, compare with `configChanges(running, next)`: entries with `widens`
-  need someone's confirmation.
+  need someone's confirmation. `bridge.askInDms` asks people in their DMs with the bot, with buttons.
+- **Log.** `log(line, level)` receives what the bridge reports; `error` marks failures someone should look at
+  (default: the console).
+
+## Showing a bridge in your app
+
+These methods are what the CLI's dashboard is built on:
+
+| Method | Gives |
+| --- | --- |
+| `status()` | IMs, agents, tools, running turns |
+| `sessions()` | conversations with agent, cost, activity, and branch status where the agent keeps branches |
+| `auditTrail({ sessionKey?, limit })` | the audit trail, newest first, secrets redacted |
+| `pendingChoices()` / `decide(id, value, person, via)` | approvals and confirmations waiting, and deciding one as a person from `people` |
+| `branchAction(key, 'merge' \| 'discard', { preview?, person, via })` | merge or discard a conversation's branch, or say what that would do |
+| `toolServers()` | each tool server, whether it answers, its tool count and OAuth state |
+
+`person` (an id from `people`) is who acts, and `via` (for example `"web"`) where; both go into the audit trail.
+`decide` refuses a person the choice doesn't allow; `branchAction` trusts the app to have checked who may act.
 
 ## Several users
 

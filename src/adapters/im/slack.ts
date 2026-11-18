@@ -2,16 +2,15 @@ import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
 import type { InboundFile, InboundMessage } from '../../core/router.ts';
 import { toSlackMrkdwn, truncateMrkdwn } from './slack-format.ts';
+import { channelNames } from './names.ts';
 import type { Choice, ImAdapter, InboundAction, OutboundMessage } from './types.ts';
 
 /** Section block text is limited to 3000 characters. */
 const SECTION_MAX = 3000;
 
 /**
- * Slack over Socket Mode (outbound WebSocket, no public URL).
- * App needs: connections:write (app token); chat:write, channels:history, groups:history,
- * im:history, channels:read, groups:read (private channel names), files:read (attachments)
- * (bot token); events message.channels, message.groups, message.im.
+ * Slack over Socket Mode (outbound WebSocket, no public URL). The app it needs (scopes, events) is the manifest
+ * in slack-manifest.ts, which `bridge slack manifest` prints.
  */
 export class SlackAdapter implements ImAdapter {
   readonly platform = 'slack';
@@ -20,7 +19,7 @@ export class SlackAdapter implements ImAdapter {
   private readonly socket: SocketModeClient;
   private readonly botToken: string;
   private botUserId = '';
-  private readonly channelNames = new Map<string, string>();
+  private readonly channelName = channelNames(async (id) => (await this.web.conversations.info({ channel: id })).channel?.name);
 
   constructor(opts: { appToken: string; botToken: string }) {
     this.web = new WebClient(opts.botToken);
@@ -144,18 +143,6 @@ export class SlackAdapter implements ImAdapter {
     };
   }
 
-  private async channelName(id: string): Promise<string> {
-    const cached = this.channelNames.get(id);
-    if (cached) return cached;
-    try {
-      const info = await this.web.conversations.info({ channel: id });
-      const name = info.channel?.name ?? id;
-      this.channelNames.set(id, name);
-      return name;
-    } catch {
-      return id;
-    }
-  }
 }
 
 /**

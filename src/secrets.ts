@@ -1,31 +1,25 @@
 import { execFileSync } from 'node:child_process';
-import { secretEnvName, type SecretResolver } from './core/secrets.ts';
+import { envSecrets, secretEnvName, type SecretResolver } from './core/secrets.ts';
 
 /** Keychain service name for every secret the bridge stores. */
 const SERVICE = 'dev.bridge';
 /** `security` exits with this when the item does not exist. */
 const NOT_FOUND = 44;
 
-/** The CLI's secrets: `secret:<name>` from the OS keychain (or BRIDGE_SECRET_<NAME>), `env:<NAME>`, or a literal. */
+const fromEnv = envSecrets();
+
+/** The CLI's secrets: `secret:<name>` from BRIDGE_SECRET_<NAME> or the OS keychain, `env:<NAME>`, or a literal. */
 export const keychainSecrets: SecretResolver = (ref) => {
-  if (ref.startsWith('env:')) {
-    const name = ref.slice(4);
-    const v = process.env[name];
-    if (!v) throw new Error(`environment variable ${name} is not set`);
-    return v;
-  }
-  if (ref.startsWith('secret:')) {
-    const name = ref.slice(7);
-    const v = process.env[envName(name)] || keychainRead(name);
-    if (v === undefined) throw new Error(`secret "${name}" not found — run: bridge secret set ${name}  (or set ${envName(name)})`);
-    return v;
-  }
-  return ref;
+  if (!ref.startsWith('secret:')) return fromEnv(ref);
+  const name = ref.slice(7);
+  const v = readSecret(name);
+  if (v === undefined) throw new Error(`secret "${name}" not found — run: bridge secret set ${name}  (or set ${secretEnvName(name)})`);
+  return v;
 };
 
 export function setSecret(name: string, value: string) {
   if (process.platform !== 'darwin') {
-    throw new Error(`no keychain support on ${process.platform} yet — export ${envName(name)} instead`);
+    throw new Error(`the keychain is only used on macOS — export ${secretEnvName(name)} instead`);
   }
   // `security -i` takes one command per line; a line break would end the value and start another command.
   if (/[\r\n]/.test(value)) throw new Error('secrets must be a single line');
@@ -45,7 +39,7 @@ export function setSecret(name: string, value: string) {
 
 /** Read a stored secret, or undefined when there is none. Keychain failures (locked, denied) throw. */
 export function readSecret(name: string): string | undefined {
-  return process.env[envName(name)] || keychainRead(name);
+  return process.env[secretEnvName(name)] || keychainRead(name);
 }
 
 export function deleteSecret(name: string) {
@@ -71,5 +65,3 @@ export function keychainRead(name: string): string | undefined {
     throw new Error(`could not read "${name}" from the keychain${why ? `: ${why}` : ''}`);
   }
 }
-
-const envName = secretEnvName;

@@ -4,8 +4,10 @@ import { anyGlob, parseDuration } from './address.ts';
 export interface ApprovalRule {
   approvers: string[];
   timeoutMs: number;
-  policy: Policy;
 }
+
+/** How long an approval waits when no matching policy sets `timeout`. */
+const APPROVAL_TIMEOUT = '10m';
 
 /**
  * Evaluates `policies:`. A policy applies when every key in its `match` holds (a missing key matches anything);
@@ -46,8 +48,8 @@ export class PolicyEngine {
     );
     if (!hits.length) return undefined;
     const approvers = [...new Set(hits.flatMap((p) => p.approve_by ?? []))];
-    const timeouts = hits.map((p) => parseDuration(p.timeout ?? '10m'));
-    return { approvers, timeoutMs: Math.min(...timeouts), policy: hits[0]! };
+    const timeouts = hits.map((p) => parseDuration(p.timeout ?? APPROVAL_TIMEOUT));
+    return { approvers, timeoutMs: Math.min(...timeouts) };
   }
 
   private forAgent(agent: string): Policy[] {

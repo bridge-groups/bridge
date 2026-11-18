@@ -4,10 +4,11 @@ import { execFileSync } from 'node:child_process';
 import { resolve, join, dirname, basename } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline';
+import { Writable } from 'node:stream';
 import { homedir } from 'node:os';
 import { checkConfig, ConfigError, formatIssue, loadConfigFile } from './config/load.ts';
 import { configChanges, describeChanges, type ConfigChange } from './config/changes.ts';
-import { AppliedConfig, ConfigGate, configSha } from './config/gate.ts';
+import { AppliedConfig, askOwners, ConfigGate, configSha, UNREADABLE_RECORD } from './config/gate.ts';
 import { configJsonSchema } from './config/json-schema.ts';
 import type { BridgeConfig } from './config/schema.ts';
 import { Bridge } from './core/bridge.ts';
@@ -24,20 +25,20 @@ import { FeishuAdapter } from './adapters/im/feishu.ts';
 import type { ImAdapter } from './adapters/im/types.ts';
 import { ToolHub } from './mcp/tools.ts';
 import { OAuthFlows } from './mcp/oauth.ts';
-import { handleWeb, localBaseUrl } from './web/api.ts';
+import { handleWeb } from './web/api.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { keychainRead, keychainSecrets, setSecret } from './secrets.ts';
 import { TEMPLATE } from './template.ts';
 import { slackManifest } from './slack-manifest.ts';
-import { expandHome, listWorktrees, removeAt, statusAt } from './adapters/agent/worktree.ts';
-import { parseDuration, sessionSlug } from './core/address.ts';
+import { branchSlug, expandHome, listWorktrees, pruneIdle, statusAt } from './adapters/agent/worktree.ts';
+import { localBaseUrl, parseDuration, sessionSlug } from './core/address.ts';
 import { installService, restartService, serviceStatus, uninstallService } from './service.ts';
 
 const HELP = `bridge — connect agents to IM, to each other, and to tools
 
 Usage: bridge <command> [options]
 
-  init                     write a starter bridge.yaml
+  init [--force]           write a starter bridge.yaml (--force overwrites one)
   up                       connect IMs and start routing
   chat --as <person>       talk to your routes from this terminal (routes from local:*)
   check [--json] [--apply]  check bridge.yaml and show what it changes against the running config;
@@ -51,14 +52,16 @@ Usage: bridge <command> [options]
   secret set <name>        store a secret in the OS keychain (value read from stdin)
   service install|uninstall|restart|status
                            run the bridge in the background via launchd (macOS)
-  worktrees                list conversation branches (claude-code agents with worktree: true)
-  worktrees prune          remove idle worktrees with nothing unmerged  [--older-than 7d] [--force]
+  worktrees                list conversation branches (agents with worktree: true)
+  worktrees prune          remove worktrees idle for --older-than (default 7d) with nothing unmerged;
+                             --force removes them with unmerged work too
   auth [<server>]          sign in to an OAuth tool server in the browser (no name: list them)
                              [--sign-out]
   dashboard                open the local web dashboard (http://127.0.0.1:7377)
   status                   show the running bridge
-  sessions                 list recent sessions
-  trace [--session <key>]  show the audit trail
+  sessions [-n 50]         list recent conversations
+  trace [--session <key>] [-n 50]
+                           show the audit trail
 
 Options: -c, --config <path>   (default ./bridge.yaml)
 `;
@@ -162,26 +165,28 @@ async function main() {
       let count = 0;
       for (const [name, agent] of Object.entries(cfg.agents)) {
         if ((agent.type !== 'claude-code' && agent.type !== 'codex') || !agent.worktree) continue;
-        for (const wt of await listWorktrees(expandHome(agent.cwd ?? process.cwd()))) {
-          const session = sessions.get(wt.branch.replace(/^bridge\//, ''));
+        const baseCwd = expandHome(agent.cwd ?? process.cwd());
+        if (prune) {
+          const isIdle = (slug: string) => (sessions.get(slug)?.last_active ?? 0) <= cutoff;
+          const opts = { baseCwd, dir: agent.worktree_dir, links: agent.worktree_links };
+          const { removed, kept, errors } = await pruneIdle(opts, isIdle, { force: values.force });
+          for (const branch of removed) {
+            const session = sessions.get(branchSlug(branch));
+            if (session) store.deleteSession(session.key);
+            console.log(`removed ${branch}`);
+          }
+          for (const k of kept) console.log(`kept    ${k}; --force to remove`);
+          for (const e of errors) console.log(`error   ${e}`);
+          count += removed.length + kept.length + errors.length;
+          continue;
+        }
+        for (const wt of await listWorktrees(baseCwd)) {
+          const session = sessions.get(branchSlug(wt.branch));
           const last = session?.last_active;
-          if (prune && last && last > cutoff) continue;
           try {
             const st = await statusAt(wt.root, wt.path, wt.branch, agent.worktree_links);
             // Unknown (base branch gone, git failing) counts as unmerged.
             const commits = st ? (st.commits ? String(st.commits.length) : 'unknown') : '0';
-            const unmerged = !!st && (!st.commits || st.commits.length > 0 || st.dirty.length > 0);
-            if (prune) {
-              if (unmerged && !values.force) {
-                console.log(`kept    ${wt.branch}  (${commits} unmerged commits, ${st?.dirty.length ?? 0} uncommitted files; --force to remove)`);
-                continue;
-              }
-              await removeAt(wt.root, wt.path, wt.branch);
-              if (session) store.deleteSession(session.key);
-              console.log(`removed ${wt.branch}`);
-              count++;
-              continue;
-            }
             count++;
             console.log(
               `${wt.branch}  [${name}]  base ${st?.base ?? '?'}  ${commits} commits  ${st?.dirty.length ?? 0} uncommitted  ` +
@@ -255,19 +260,34 @@ async function main() {
 
 async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretResolver) => ImAdapter[], opts: { quiet?: boolean } = {}) {
   load(configPath); // exits with the file's problems listed
-  const log = opts.quiet ? (l: string) => void (l.startsWith('inbound error') && console.error(l)) : (l: string) => console.log(l);
+  // `bridge chat` keeps the console for the conversation: only failures are shown.
+  const log = (line: string, level: 'info' | 'error') => (level === 'error' ? console.error(line) : opts.quiet || console.log(line));
   let bridge: Bridge | undefined;
   // A change that widens access waits for an owner, also across restarts: the bridge starts with the config
   // applied last until then.
-  const gate = new ConfigGate({
+  const gate: ConfigGate = new ConfigGate({
     path: configPath,
     applied: AppliedConfig.for(configPath),
-    apply: (next) => bridge?.reload(next),
-    log: (l) => console.log(l),
-    onPending: (pending, signal) =>
-      void bridge?.askOwnersAboutConfig(pending, signal).catch((err) => console.error(`config confirmation not sent: ${(err as Error).message}`)),
+    apply: (next) => {
+      running = next;
+      bridge?.reload(next);
+    },
+    log: (l) => log(l, 'info'),
+    onPending: (pending, signal) => {
+      if (!bridge) return;
+      askOwners(bridge, running, gate, pending, signal).then(
+        (asked) => asked || log('no owner has a direct message with the bot yet: confirm with "bridge check --apply" or the dashboard', 'info'),
+        (err) => log(`config confirmation not sent: ${(err as Error).message}`, 'error'),
+      );
+    },
   });
-  const cfg = gate.initial();
+  let running: BridgeConfig;
+  try {
+    running = gate.initial();
+  } catch (err) {
+    fail((err as Error).message);
+  }
+  const cfg = running;
   const store = openStore(cfg, configPath);
   gate.onAudit((event) => store.trace('config', 'config', event.by ?? 'file', JSON.stringify(event)));
   const filesDir = join(resolve(configPath, '..', cfg.server.data_dir), 'files');
@@ -278,7 +298,13 @@ async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretR
     if (value !== ref) redactor.add(value);
     return value;
   };
-  const web = (req: IncomingMessage, res: ServerResponse, url: URL) => handleWeb(bridge!, req, res, url);
+  // The dashboard decides as this machine's owner: the first person with trust owner.
+  const owner = () => {
+    const id = Object.entries(running.people).find(([, p]) => p.trust === 'owner')?.[0];
+    if (!id) throw new Error('no person with trust: owner in bridge.yaml — the dashboard acts as that person');
+    return id;
+  };
+  const web = (req: IncomingMessage, res: ServerResponse, url: URL) => handleWeb({ bridge: bridge!, gate, owner }, req, res, url);
   bridge = new Bridge({
     cfg,
     store,
@@ -291,10 +317,9 @@ async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretR
     filesDir,
     log,
   });
-  bridge.attachConfigGate(gate);
   const { mcpUrl } = await bridge.start();
-  log(`bridge up — MCP hub ${mcpUrl}, ${Object.keys(cfg.agents).length} agents, ${cfg.routes.length} routes`);
-  log(`dashboard: ${localBaseUrl(cfg.server)}/`);
+  log(`bridge up — MCP hub ${mcpUrl}, ${Object.keys(cfg.agents).length} agents, ${cfg.routes.length} routes`, 'info');
+  log(`dashboard: ${localBaseUrl(cfg.server)}/`, 'info');
   gate.offer(); // a widening change made while the bridge was down asks now
 
   let timer: NodeJS.Timeout | undefined;
@@ -388,12 +413,15 @@ async function check(configPath: string, opts: { json: boolean; apply: boolean }
   const applied = AppliedConfig.for(configPath);
   const appliedText = applied.read();
   const running = appliedText === undefined ? undefined : checkConfig(appliedText).config;
+  const unreadable = appliedText !== undefined && !running;
   const changes: ConfigChange[] = config && running ? configChanges(running, config) : [];
   const needsConfirmation = changes.some((c) => c.widens);
   const file = basename(configPath);
 
   if (opts.json && !opts.apply) {
-    console.log(JSON.stringify({ ok: !!config, sha, issues, changes, needsConfirmation, firstApply: !running }, null, 2));
+    console.log(
+      JSON.stringify({ ok: !!config, sha, issues, changes, needsConfirmation: needsConfirmation || unreadable, firstApply: appliedText === undefined }, null, 2),
+    );
     process.exit(config ? 0 : 1);
   }
   if (!config) {
@@ -402,7 +430,8 @@ async function check(configPath: string, opts: { json: boolean; apply: boolean }
   }
   if (!opts.apply) {
     console.log(`${file} is valid (${sha}${config.tests.length ? `, ${config.tests.length} tests pass` : ''})`);
-    if (!running) console.log('nothing applied yet: the bridge starts with this file as it is');
+    if (unreadable) console.log(UNREADABLE_RECORD);
+    else if (!running) console.log('nothing applied yet: the bridge starts with this file as it is');
     else if (!changes.length) console.log('no changes against the running config');
     else {
       for (const line of describeChanges(changes)) console.log(`  ${line}`);
@@ -458,12 +487,12 @@ function readSecretValue(prompt: string): Promise<string> {
       process.stdin.on('data', (d) => (s += d)).on('end', () => res(s.trim()));
     });
   }
+  // Typed characters are echoed to a stream that drops them, so the secret never shows on screen.
+  process.stdout.write(prompt);
+  const hidden = new Writable({ write: (_chunk, _enc, done) => done() });
   return new Promise((res) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = (s) => {
-      if (s.includes(prompt)) process.stdout.write(prompt);
-    };
-    rl.question(prompt, (v) => {
+    const rl = createInterface({ input: process.stdin, output: hidden, terminal: true });
+    rl.question('', (v) => {
       rl.close();
       process.stdout.write('\n');
       res(v.trim());
@@ -493,7 +522,7 @@ ${JSON.stringify(
   null,
   2,
 )}
-   (im:message.group_msg is only needed for routes with \`listen: all\`.)
+   (im:message.group_msg is only needed for routes with \`mention: false\`.)
 3. Events & Callbacks:
    - Event configuration → subscription mode: "Receive events through persistent connection" (长连接),
      add event im.message.receive_v1.

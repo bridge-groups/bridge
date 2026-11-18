@@ -3,7 +3,7 @@ import type { TrustLevel } from '../config/schema.ts';
 
 export type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'file'; name: string; url?: string; mime?: string; /** Local copy the agent can read. */ path?: string };
+  | { type: 'file'; name: string; mime?: string; /** Local copy the agent can read. */ path?: string };
 
 export type Sender =
   | { kind: 'person'; id: string; platform: string; platformUserId: string; displayName?: string }
@@ -30,12 +30,6 @@ export interface Envelope {
 
 export function newEnvelope(e: Omit<Envelope, 'id' | 'createdAt'>): Envelope {
   return { ...e, id: randomUUID(), createdAt: Date.now() };
-}
-
-export function textOf(e: Pick<Envelope, 'content'>): string {
-  return e.content
-    .map((b) => (b.type === 'text' ? b.text : `[file: ${b.name}${b.path ? ` ${b.path}` : b.url ? ` ${b.url}` : ''}]`))
-    .join('\n');
 }
 
 const ORDER: TrustLevel[] = ['external', 'agent', 'member', 'trusted', 'owner'];

@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, existsSync, utimesSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { parseConfig } from '../config/load.ts';
 import { Bridge, codeBlock } from '../core/bridge.ts';
 import { localAgents } from '../adapters/agent/local.ts';
@@ -13,7 +11,7 @@ import { SqliteStore } from '../core/store.ts';
 import { Redactor } from '../core/redact.ts';
 import type { AgentAdapter, AgentTurn, Workspace } from '../adapters/agent/types.ts';
 import type { ImAdapter, OutboundMessage } from '../adapters/im/types.ts';
-import { FakeIm } from './helpers.ts';
+import { FakeIm, scripted, text, until } from './helpers.ts';
 
 const yaml = (extra = '') => `
 server: { port: 0 }
@@ -32,31 +30,6 @@ policies:
   - { match: { tool: "fake.delete*" }, approve_by: [initiator], timeout: 5s }
 ${extra}`;
 
-/** Wait for a condition (never a fixed delay); fails after 10s so a broken test can't hang. */
-async function until(cond: () => boolean, what: string) {
-  const end = Date.now() + 10e3;
-  while (!cond()) {
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
-
-function scripted(name: string, script: (mcp: Client, turn: AgentTurn) => Promise<string>): AgentAdapter {
-  return {
-    name,
-    async run(turn) {
-      const client = new Client({ name, version: '0' });
-      await client.connect(new StreamableHTTPClientTransport(new URL(turn.mcp.url)));
-      try {
-        return { text: await script(client, turn), agentSessionId: `${name}-s` };
-      } finally {
-        await client.close();
-      }
-    },
-  };
-}
-
-const text = (r: any) => r.content.map((c: any) => c.text).join('');
 
 async function setup(opts: { agents?: AgentAdapter[]; im?: FakeIm; store?: SqliteStore; extra?: string; filesDir?: string } = {}) {
   const im = opts.im ?? new FakeIm();
@@ -220,7 +193,7 @@ test('an approval that outlives its turn is cancelled and the tool never runs', 
     assert.ok(turn?.signal?.aborted, 'the agent got a signal, aborted when the turn ended');
     const [id, msg] = [...im.choiceMessages.entries()][0]!;
     assert.equal(msg.outcome, '✖ Cancelled: the turn has ended.');
-    assert.deepEqual(bridge.webChoices(), []);
+    assert.deepEqual(bridge.pendingChoices(), []);
     im.click(id, 'Approve', 'U1');
     await bridge.idle();
     assert.equal(im.notices.at(-1)?.text, 'This choice has already been decided or has expired.');
@@ -297,10 +270,7 @@ test('approval prompt: arguments in a code block they cannot break out of, cut t
     return 'done';
   });
   const { bridge } = await setup({ agents: [boss], im });
-  im.onSend((m) => {
-    // After sendChoice has recorded the message (its send fires this listener first).
-    if (m.text.startsWith('🔐')) setImmediate(() => im.click([...im.choiceMessages.keys()].at(-1)!, 'Approve', 'U1'));
-  });
+  im.onChoice((id) => im.click(id, 'Approve', 'U1'));
   try {
     im.receive({ userId: 'U1', text: 'go', channelName: 'boss' });
     await bridge.idle();
@@ -308,7 +278,7 @@ test('approval prompt: arguments in a code block they cannot break out of, cut t
     assert.equal(escaped.match(/```/g)?.length, 2, escaped);
     assert.match(escaped, /"id": "a\\u0060\\u0060\\u0060b"/);
     assert.ok(long.length <= im.maxTextLength, `${long.length} characters`);
-    assert.match(long, /… \+\d+ more characters \(all arguments: dashboard → Activity\)\n```\nalice can decide/);
+    assert.match(long, /… \+\d+ more characters \(all of them are in the audit trail\)\n```\nalice can decide/);
   } finally {
     await bridge.stop();
   }
@@ -341,6 +311,7 @@ test('a message named like an Object.prototype member is a prompt, not a command
     merge: async () => (calls.push('merge'), ''),
     previewDiscard: async () => (calls.push('previewDiscard'), ''),
     discard: async () => (calls.push('discard'), ''),
+    prune: async () => ({ removed: [], errors: [] }),
   };
   const boss: AgentAdapter = { name: 'boss', workspace: ws, async run(t) { return { text: `ran: ${t.text}` }; } };
   const { im, bridge } = await setup({ agents: [boss] });
@@ -431,18 +402,19 @@ test('dashboard: branch status is cached and refreshed when a turn ends', async 
     merge: async () => '',
     previewDiscard: async () => '',
     discard: async () => '',
+    prune: async () => ({ removed: [], errors: [] }),
   };
   const boss: AgentAdapter = { name: 'boss', workspace: ws, async run() { return { text: 'ok' }; } };
   const { im, bridge } = await setup({ agents: [boss] });
   try {
     im.receive({ userId: 'U1', text: 'go', channelName: 'boss' });
     await bridge.idle();
-    assert.equal((await bridge.webSessions())[0]?.branch, '🌿 bridge/x');
-    await bridge.webSessions();
+    assert.equal((await bridge.sessions())[0]?.branch, '🌿 bridge/x');
+    await bridge.sessions();
     assert.equal(statusCalls, 1, 'the second poll is served from the cache');
     im.receive({ userId: 'U1', text: 'more', channelName: 'boss', mentioned: false });
     await bridge.idle();
-    await bridge.webSessions();
+    await bridge.sessions();
     assert.equal(statusCalls, 2, 'a finished turn refreshes it');
   } finally {
     await bridge.stop();

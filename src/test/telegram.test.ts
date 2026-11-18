@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TelegramAdapter } from '../adapters/im/telegram.ts';
+import { until } from './helpers.ts';
 import type { InboundMessage } from '../core/router.ts';
 
 /** A local Bot API: getUpdates long-polls until updates are queued; sendMessage can be held. */
@@ -66,13 +67,6 @@ const message = (update: number, id: number, text: string, replyTo?: { id: numbe
   },
 });
 
-async function until(check: () => boolean, what: string) {
-  const end = Date.now() + 10_000;
-  while (!check()) {
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
 
 test('telegram: offset is confirmed on stop and persisted, reply chains survive a restart, stop spares sends', async () => {
   const tg = await fakeTelegram();

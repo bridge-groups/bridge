@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Bridge, parseConfig, SqliteStore, type AgentAdapter, type SecretResolver } from '../index.ts';
+import { VERSION } from '../core/version.ts';
 import { FakeIm } from './helpers.ts';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +26,10 @@ function runtimeGraph(entry: string): Set<string> {
   visit(join(SRC, entry));
   return new Set([...seen].map((f) => relative(SRC, f)));
 }
+
+test('library: VERSION is the package version', () => {
+  assert.equal(VERSION, JSON.parse(readFileSync(join(SRC, '..', 'package.json'), 'utf8')).version);
+});
 
 test('library: the lib entry point never loads the CLI, the keychain, the dashboard or local agents', () => {
   const lib = runtimeGraph('index.ts');

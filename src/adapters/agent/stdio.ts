@@ -6,6 +6,7 @@ import { parseDuration } from '../../core/address.ts';
 import type { SecretResolver } from '../../core/secrets.ts';
 import type { AgentAdapter, AgentReply, AgentTurn } from './types.ts';
 import { terminateTree } from './process-tree.ts';
+import { agentEvent, turnMessage } from './protocol.ts';
 
 type StdioConfig = Extract<AgentConfig, { type: 'stdio' }>;
 
@@ -13,17 +14,15 @@ interface Pending {
   resolve: (r: AgentReply) => void;
   reject: (e: Error) => void;
   turn: AgentTurn;
+  /** The agent's session id as the turn knows it so far. */
+  sessionId?: string;
   /** The process this turn was sent to. */
   child: ChildProcessWithoutNullStreams;
 }
 
 /**
- * A long-running local process speaking JSON lines.
- *   bridge → agent  {"type":"turn","id":…,"text":…,"session_id":…,"envelope":{…},"mcp":{"url":…}}
- *                   {"type":"cancel","id":…}   (the turn was stopped or timed out; its reply is no longer read)
- *   agent → bridge  {"type":"progress","id":…,"text":"…"}
- *                   {"type":"reply","id":…,"text":"…","session_id":"…","cost_usd":0}
- *                   {"type":"error","id":…,"message":"…"}
+ * A long-running local process speaking JSON lines: the messages of protocol.ts, each with the turn's `id`, plus
+ * {"type":"cancel","id"} from the bridge when a turn is stopped or times out (its reply is no longer read).
  */
 export class StdioAgent implements AgentAdapter {
   readonly name: string;
@@ -65,20 +64,12 @@ export class StdioAgent implements AgentAdapter {
       signal?.addEventListener('abort', onAbort, { once: true });
       this.pending.set(id, {
         turn,
+        sessionId: turn.agentSessionId,
         child,
         resolve: (r) => (settle(), resolve(r)),
         reject: (e) => (settle(), reject(e)),
       });
-      this.write(child, {
-        type: 'turn',
-        id,
-        text: turn.text,
-        session_id: turn.agentSessionId ?? null,
-        budget_usd: turn.budgetUsd ?? null,
-        files: turn.files ?? [],
-        envelope: turn.envelope,
-        mcp: { url: turn.mcp.url },
-      });
+      this.write(child, { ...turnMessage(turn), id });
     });
   }
 
@@ -126,23 +117,21 @@ export class StdioAgent implements AgentAdapter {
   }
 
   private onLine(line: string) {
-    let msg: any;
+    let msg: unknown;
     try {
       msg = JSON.parse(line);
     } catch {
-      return;
+      return; // not a protocol line (a stray log line)
     }
-    const p = this.pending.get(msg?.id);
+    if (typeof msg !== 'object' || msg === null) return;
+    const p = this.pending.get(String((msg as { id?: unknown }).id));
     if (!p) return;
-    if (msg.type === 'progress') p.turn.onProgress?.(String(msg.text ?? ''));
-    else if (msg.type === 'reply') {
-      p.resolve({
-        text: String(msg.text ?? ''),
-        agentSessionId: typeof msg.session_id === 'string' ? msg.session_id : p.turn.agentSessionId,
-        costUsd: typeof msg.cost_usd === 'number' ? msg.cost_usd : undefined,
-      });
-    } else if (msg.type === 'error') {
-      p.reject(new Error(String(msg.message ?? 'agent error')));
-    }
+    const ev = agentEvent(msg as Record<string, unknown>, p.sessionId, this.name);
+    if (ev?.type === 'progress') p.turn.onProgress?.(ev.text);
+    else if (ev?.type === 'session') {
+      p.sessionId = ev.id;
+      p.turn.onSessionId?.(ev.id);
+    } else if (ev?.type === 'reply') p.resolve(ev.reply);
+    else if (ev?.type === 'error') p.reject(new Error(ev.message));
   }
 }

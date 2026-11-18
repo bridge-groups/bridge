@@ -1,14 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
 import { localAgents } from '../adapters/agent/local.ts';
 import { SqliteStore } from '../core/store.ts';
 import type { AgentAdapter, AgentTurn } from '../adapters/agent/types.ts';
-import { FakeIm } from './helpers.ts';
+import { FakeIm, scripted, text, until } from './helpers.ts';
 
 const yaml = (extraRoutes = '', extraPolicies = '') => `
 server: { port: 0 }
@@ -29,23 +27,6 @@ policies:
   - { match: { tool: "fake.delete*" }, approve_by: [initiator], timeout: 5s }
 ${extraPolicies}`;
 
-/** An in-test agent that drives the bridge's MCP endpoint like a real agent would. */
-function scripted(name: string, script: (mcp: Client, turn: AgentTurn) => Promise<string>): AgentAdapter {
-  return {
-    name,
-    async run(turn) {
-      const client = new Client({ name, version: '0' });
-      await client.connect(new StreamableHTTPClientTransport(new URL(turn.mcp.url)));
-      try {
-        return { text: await script(client, turn), agentSessionId: `${name}-s` };
-      } finally {
-        await client.close();
-      }
-    },
-  };
-}
-
-const text = (r: any) => r.content.map((c: any) => c.text).join('');
 
 async function setup(agents: AgentAdapter[] = [], extraRoutes = '', extraPolicies = '') {
   const im = new FakeIm();
@@ -130,11 +111,12 @@ test('approval: only the initiator can approve; tool runs after approve', async 
   );
   const { im, bridge, done } = await setup([boss]);
   im.onSend((m) => {
+    // The bridge waits for the answer before it asks, so it can come at once.
     if (m.text.startsWith('🔐')) {
-      setTimeout(() => {
+      queueMicrotask(() => {
         im.receive({ userId: 'U1', text: 'approve', channelName: 'boss', mentioned: false }); // alice is not the initiator
         im.receive({ userId: 'U2', text: 'approve', channelName: 'boss', mentioned: false }); // bob is
-      }, 10);
+      });
     }
   });
   try {
@@ -158,7 +140,7 @@ test('approval denied → tool does not run', async () => {
   });
   const { im, bridge, done } = await setup([boss]);
   im.onSend((m) => {
-    if (m.text.startsWith('🔐')) setTimeout(() => im.receive({ userId: 'U1', text: 'deny', channelName: 'boss', mentioned: false }), 10);
+    if (m.text.startsWith('🔐')) queueMicrotask(() => im.receive({ userId: 'U1', text: 'deny', channelName: 'boss', mentioned: false }));
   });
   try {
     im.receive({ userId: 'U1', text: 'delete 7', channelName: 'boss' });
@@ -175,7 +157,7 @@ test('ask_human waits for the initiator in the same thread', async () => {
   );
   const { im, bridge, done } = await setup([boss]);
   im.onSend((m) => {
-    if (m.text.startsWith('❓')) setTimeout(() => im.receive({ userId: 'U1', text: 'staging', channelName: 'boss', mentioned: false }), 10);
+    if (m.text.startsWith('❓')) queueMicrotask(() => im.receive({ userId: 'U1', text: 'staging', channelName: 'boss', mentioned: false }));
   });
   try {
     im.receive({ userId: 'U1', text: 'deploy', channelName: 'boss' });
@@ -245,14 +227,10 @@ test('approval buttons: wrong person is told privately, right person approves, m
   const im = new FakeIm().withButtons();
   const bridge = new Bridge({ agentFactory: localAgents, cfg: parseConfig(yaml()), store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['boss', boss]]), log: () => {} });
   await bridge.start();
-  im.onSend((m) => {
-    if (!m.text.startsWith('🔐')) return;
-    setTimeout(() => {
-      const id = [...im.choiceMessages.keys()].at(-1)!;
-      im.click(id, 'Approve', 'U1'); // alice: not the initiator
-      im.click(id, 'Approve', 'U2'); // bob: the initiator
-      im.click(id, 'Deny', 'U2'); // too late, already decided
-    }, 10);
+  im.onChoice((id) => {
+    im.click(id, 'Approve', 'U1'); // alice: not the initiator
+    im.click(id, 'Approve', 'U2'); // bob: the initiator
+    im.click(id, 'Deny', 'U2'); // too late, already decided
   });
   try {
     im.receive({ userId: 'U2', text: 'delete 9', channelName: 'boss' });
@@ -369,7 +347,8 @@ test('verbose progress lists the recent steps in the placeholder', async () => {
     name: 'echo',
     async run(t) {
       for (const s of ['Read a.ts', 'Read b.ts', 'Edit a.ts']) t.onProgress?.(s);
-      await new Promise((r) => setTimeout(r, 1700));
+      // Edits are throttled: the later steps show once the next edit is due.
+      await until(() => im.edits.some((e) => e.text.includes('3 steps')), 'the throttled progress edit');
       return { text: 'done' };
     },
   };

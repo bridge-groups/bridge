@@ -8,11 +8,7 @@
       "const": 1
     },
     "server": {
-      "default": {
-        "host": "127.0.0.1",
-        "port": 7377,
-        "data_dir": ".bridge"
-      },
+      "default": {},
       "type": "object",
       "properties": {
         "host": {
@@ -56,9 +52,6 @@
             "type": "string"
           },
           "telegram": {
-            "type": "string"
-          },
-          "discord": {
             "type": "string"
           },
           "feishu": {
@@ -484,13 +477,6 @@
                   "string"
                 ]
               },
-              "listen": {
-                "type": "string",
-                "enum": [
-                  "all",
-                  "mention"
-                ]
-              },
               "sender": {
                 "anyOf": [
                   {
@@ -600,16 +586,7 @@
       }
     },
     "defaults": {
-      "default": {
-        "dm_idle_reset": "2h",
-        "offline_queue_ttl": "24h",
-        "progress": "collapsed",
-        "max_hops": 4,
-        "max_file_mb": 20,
-        "files_ttl": "7d",
-        "worktree_prune_after": "7d",
-        "retention": "30d"
-      },
+      "default": {},
       "type": "object",
       "properties": {
         "dm_idle_reset": {

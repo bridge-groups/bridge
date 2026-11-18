@@ -37,19 +37,19 @@ export function configChanges(prev: BridgeConfig, next: BridgeConfig): ConfigCha
   }
 
   // Routes match first-to-last, so a new route or a new order can let a message reach another agent.
-  const routes = listChanges(prev.routes, next.routes, routeText);
-  out.push(...routes.added.map((key) => ({ section: 'routes', key, kind: 'added' as const, widens: true })));
-  out.push(...routes.removed.map((key) => ({ section: 'routes', key, kind: 'removed' as const, widens: false })));
+  const routes = listChanges(prev.routes, next.routes);
+  out.push(...routes.added.map((r) => ({ section: 'routes', key: routeText(r), kind: 'added' as const, widens: true })));
+  out.push(...routes.removed.map((r) => ({ section: 'routes', key: routeText(r), kind: 'removed' as const, widens: false })));
   if (routes.reordered) out.push({ section: 'routes', key: 'order', kind: 'reordered', widens: true });
 
   // A removed policy lifts an approval or limit; an added one only adds them, unless it names new approvers.
-  const policies = listChanges(prev.policies, next.policies, policyText);
-  const added = next.policies.filter((p) => !prev.policies.some((q) => isDeepStrictEqual(p, q)));
-  for (const p of added) {
+  // Their order doesn't matter: every applying policy counts.
+  const policies = listChanges(prev.policies, next.policies);
+  for (const p of policies.added) {
     const approvers = (p.approve_by ?? []).some((who) => who !== 'initiator');
     out.push({ section: 'policies', key: policyText(p), kind: 'added', widens: approvers });
   }
-  out.push(...policies.removed.map((key) => ({ section: 'policies', key, kind: 'removed' as const, widens: true })));
+  out.push(...policies.removed.map((p) => ({ section: 'policies', key: policyText(p), kind: 'removed' as const, widens: true })));
 
   if (prev.server.host !== next.server.host) out.push({ section: 'server', key: 'host', kind: 'changed', widens: true });
   for (const key of ['port', 'data_dir'] as const) {
@@ -96,17 +96,16 @@ function fieldWidens(field: string, a: unknown, b: unknown): boolean {
 }
 
 /** Entries only in `b` (added) or only in `a` (removed), counting duplicates; `reordered` when only the order differs. */
-function listChanges<T>(a: T[], b: T[], text: (t: T) => string) {
+function listChanges<T>(a: T[], b: T[]) {
   const left = [...a];
-  const added: string[] = [];
+  const added: T[] = [];
   for (const item of b) {
     const i = left.findIndex((x) => isDeepStrictEqual(x, item));
     if (i >= 0) left.splice(i, 1);
-    else added.push(text(item));
+    else added.push(item);
   }
-  const removed = left.map(text);
-  const reordered = !added.length && !removed.length && !isDeepStrictEqual(a, b);
-  return { added, removed, reordered };
+  const reordered = !added.length && !left.length && !isDeepStrictEqual(a, b);
+  return { added, removed: left, reordered };
 }
 
 function routeText(r: Route): string {

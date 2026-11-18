@@ -29,7 +29,7 @@ tools:
   remote: { url: "http://127.0.0.1:9/mcp", oauth: true }
 `);
   // Like the CLI: the dashboard is mounted next to the bridge's own routes.
-  const bridge: Bridge = new Bridge({ extraRoutes: (req, res, url) => handleWeb(bridge, req, res, url), cfg, store: new SqliteStore(':memory:'), ims: [new FakeIm()], oauthStorage: memoryStorage(), log: () => {} });
+  const bridge: Bridge = new Bridge({ extraRoutes: (req, res, url) => handleWeb({ bridge, owner: () => 'alice' }, req, res, url), cfg, store: new SqliteStore(':memory:'), ims: [new FakeIm()], oauthStorage: memoryStorage(), log: () => {} });
   const { mcpUrl: base } = await bridge.start();
   const host = new URL(base).host;
   try {

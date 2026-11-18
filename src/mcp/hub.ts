@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { VERSION } from '../core/version.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -59,7 +60,7 @@ export class McpHub {
     const body = req.method === 'POST' ? await readJson(req) : undefined;
 
     // Stateless: a fresh MCP server per request, bound to this grant.
-    const server = new Server({ name: 'bridge', version: '0.1.0' }, { capabilities: { tools: {} } });
+    const server = new Server({ name: 'bridge', version: VERSION }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await this.backend.listTools(grant) }));
     server.setRequestHandler(CallToolRequestSchema, async (r) => {
       try {

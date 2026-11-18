@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkConfig, parseConfig } from '../config/load.ts';
 import { configChanges } from '../config/changes.ts';
-import { AppliedConfig, ConfigGate, configSha, type ConfigEvent, type PendingConfig } from '../config/gate.ts';
+import { AppliedConfig, askOwners, ConfigGate, configSha, type ConfigEvent, type PendingConfig } from '../config/gate.ts';
 import { configJsonSchema, SCHEMA_FILE } from '../config/json-schema.ts';
 import type { BridgeConfig } from '../config/schema.ts';
 import { TEMPLATE } from '../template.ts';
 import { Bridge } from '../core/bridge.ts';
 import { SqliteStore } from '../core/store.ts';
-import { FakeIm } from './helpers.ts';
+import { FakeIm, until } from './helpers.ts';
 
 const BASE = `server: { port: 0 }
 people:
@@ -234,6 +234,20 @@ test('gate: narrowing edits apply at once; widening ones wait for an owner, also
   assert.equal(f.make().initial().routes.length, 2);
 });
 
+test('gate: a record this version cannot read holds everything until an owner confirms the file', () => {
+  const f = gateFixture();
+  f.make().initial();
+  // As if written by a version whose schema had a setting this one dropped.
+  writeFileSync(join(f.path, '..', 'state', 'applied.yaml'), `${BASE}defaults: { gone: 1 }\n`);
+  assert.throws(() => f.make().initial(), /not valid for this version.*bridge check --apply/);
+  const gate = f.make();
+  gate.offer();
+  assert.equal(f.applied.length, 0, 'nothing applies unreviewed');
+  assert.deepEqual(gate.confirm(configSha(BASE), 'alice'), [], 'confirming the whole file moves on');
+  assert.equal(f.applied.length, 1);
+  assert.equal(f.make().initial().routes.length, 2);
+});
+
 test('gate: a rejected change stays out until the file changes; an invalid file keeps the running config', () => {
   const f = gateFixture();
   const gate = f.make();
@@ -264,15 +278,19 @@ test('config confirmation: owners are asked in their DM, and a click applies the
   const im = new FakeIm().withButtons();
   const store = new SqliteStore(':memory:');
   let bridge: Bridge | undefined;
-  const gate = new ConfigGate({
+  let running: BridgeConfig;
+  const gate: ConfigGate = new ConfigGate({
     path: f.path,
     applied: new AppliedConfig(join(f.path, '..', 'state', 'applied.yaml')),
-    apply: (c) => bridge!.reload(c),
+    apply: (c) => {
+      running = c;
+      bridge!.reload(c);
+    },
     log: () => {},
-    onPending: (p, signal) => bridge!.askOwnersAboutConfig(p, signal),
+    onPending: (p, signal) => void askOwners(bridge!, running, gate, p, signal),
   });
-  bridge = new Bridge({ cfg: gate.initial(), store, ims: [im], agents: new Map([['echo', { name: 'echo', async run() { return { text: 'hi' }; } }]]), log: () => {} });
-  bridge.attachConfigGate(gate);
+  running = gate.initial();
+  bridge = new Bridge({ cfg: running, store, ims: [im], agents: new Map([['echo', { name: 'echo', async run() { return { text: 'hi' }; } }]]), log: () => {} });
   await bridge.start();
   try {
     // Alice has talked to the bot in a DM, so the bridge knows where to ask her.
@@ -285,8 +303,8 @@ test('config confirmation: owners are asked in their DM, and a click applies the
     assert.equal(im.sent[0]!.channelId, 'D1');
     assert.match(msg.text, /widens access/);
     assert.match(msg.text, /\+ routes added: slack:#dev → echo \(sender: alice, bob\)/);
-    assert.deepEqual(bridge.webChoices(), [], 'listed in its own dashboard section, not twice');
-    assert.equal(bridge.webConfig().pending?.sha, configSha(wider));
+    assert.deepEqual(bridge.pendingChoices(), [], 'listed in its own dashboard section, not twice');
+    assert.equal(gate.pending()?.sha, configSha(wider));
 
     im.click(id, 'Apply', 'U2');
     await until(() => im.notices.length === 1);
@@ -301,12 +319,12 @@ test('config confirmation: owners are asked in their DM, and a click applies the
     await bridge.idle();
     assert.ok(im.transcript().includes('hi'), 'bob reaches echo once the change applies');
 
-    // From the dashboard / CLI: the change is decided as the owner, and an unexpected sha is refused.
+    // Decided elsewhere (the dashboard, the CLI): the question in the DM is withdrawn.
     f.edit(wider.replace('slack: U2', 'slack: U3'));
     gate.offer();
     await until(() => im.choiceMessages.size === 2);
-    assert.throws(() => bridge!.webConfigDecide('nope', 'apply', 'cli'), /changed since/);
-    bridge.webConfigDecide(gate.pending()!.sha, 'reject', 'web');
+    assert.throws(() => gate.confirm('nope', 'alice (cli)'), /changed since/);
+    gate.reject(gate.pending()!.sha, 'alice (web)');
     const second = [...im.choiceMessages.values()][1]!;
     await until(() => second.outcome !== undefined);
     assert.equal(second.outcome, '✖ Cancelled: rejected by alice (web).');
@@ -315,10 +333,3 @@ test('config confirmation: owners are asked in their DM, and a click applies the
   }
 });
 
-async function until(check: () => boolean, ms = 3000) {
-  const end = Date.now() + ms;
-  while (!check()) {
-    if (Date.now() > end) throw new Error('condition not reached');
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}

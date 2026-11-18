@@ -66,7 +66,7 @@ function launchctl(args: string[], tolerateFailure = false): string {
 }
 
 function assertMac() {
-  if (process.platform !== 'darwin') throw new Error('service commands use launchd and only work on macOS for now');
+  if (process.platform !== 'darwin') throw new Error('service commands use launchd, so they only work on macOS');
 }
 
 function plist(obj: Record<string, unknown>): string {

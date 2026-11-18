@@ -43,7 +43,7 @@ export function memoryStorage(): OAuthStorage {
 
 export class NeedsSignIn extends Error {
   constructor(server: string) {
-    super(`not signed in to "${server}" — run: bridge auth ${server}  (or use Connect in the web UI)`);
+    super(`not signed in to "${server}" — the bridge's owner has to sign in to it first`);
   }
 }
 
@@ -177,15 +177,15 @@ export interface SignInResult {
 }
 
 /**
- * Browser sign-in flows: GET /oauth/start/<server> redirects to the provider, which comes back to
- * GET /oauth/callback. Served by the bridge's local HTTP server (or a temporary one from the CLI).
+ * Browser sign-in flows: `start` (or GET /oauth/start/<server>, for an app that serves it behind its own
+ * checks) redirects to the provider, which comes back to GET /oauth/callback under the bridge's base URL.
  */
 export class OAuthFlows {
   private readonly pending = new Map<string, { server: string; provider: BridgeOAuthProvider; at: number }>();
   private readonly results = new Map<string, SignInResult>();
   private readonly servers: () => Record<string, unknown>;
-  readonly storage: OAuthStorage;
-  readonly redirectUrl: string;
+  private readonly storage: OAuthStorage;
+  private readonly redirectUrl: string;
   private readonly secrets: SecretResolver;
   /** Called after a sign-in or sign-out (e.g. to reconnect the tool server). */
   private readonly onChange: (server: string) => void;
@@ -274,8 +274,8 @@ export class OAuthFlows {
 
   /**
    * Handles /oauth/start/<server> and /oauth/callback; false for other paths.
-   * Starting is only allowed from a navigation the user made (address bar, `bridge auth`, or the
-   * dashboard): another site embedding the URL must not be able to begin flows.
+   * Starting is only allowed from a navigation the user made (address bar, a link on the same site): another
+   * site embedding the URL must not be able to begin flows.
    */
   async handle(req: IncomingMessage, res: ServerResponse, url: URL, done?: (server: string, err?: Error) => void): Promise<boolean> {
     if (req.method !== 'GET') return false;
@@ -283,7 +283,7 @@ export class OAuthFlows {
     if (start) {
       const site = req.headers['sec-fetch-site'];
       if (site !== 'same-origin' && site !== 'none') {
-        page(res, 403, 'Sign-in not started', 'Open the sign-in from the bridge dashboard or with `bridge auth <server>`.');
+        page(res, 403, 'Sign-in not started', 'Start the sign-in again from where you began it; links from other sites are refused.');
         return true;
       }
       try {
@@ -316,7 +316,6 @@ function page(res: ServerResponse, status: number, title: string, body: string) 
   res.end(
     `<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>` +
       `<body style="font:16px system-ui;max-width:36rem;margin:4rem auto;padding:0 1rem">` +
-      `<h1 style="font-size:1.3rem">${status === 200 ? '✅' : '⚠️'} ${esc(title)}</h1><p>${esc(body)}</p>` +
-      `<p><a href="/">Open the bridge dashboard</a></p></body>`,
+      `<h1 style="font-size:1.3rem">${status === 200 ? '✅' : '⚠️'} ${esc(title)}</h1><p>${esc(body)}</p></body>`,
   );
 }

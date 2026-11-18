@@ -1,58 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { OAuthFlows } from '../mcp/oauth.ts';
+import type { Bridge } from '../core/bridge.ts';
+import type { ConfigGate } from '../config/gate.ts';
 import { PAGE } from './page.ts';
-import type { ConfigChange } from '../config/changes.ts';
-import type { PendingConfig } from '../config/gate.ts';
 
-export interface WebSession {
-  key: string;
-  agent: string;
-  platform: string;
-  initiator: string;
-  createdAt: number;
-  lastActive: number;
-  spentUsd: number;
-  busy: boolean;
-  /** The conversation branch, or undefined when the agent has no workspace / no branch yet. */
-  branch?: string;
-  /** The branch has commits that can be squash-merged now. */
-  canMerge?: boolean;
-}
-
-export interface WebChoice {
-  id: string;
-  key: string;
-  text: string;
-  choices: { label: string; value: string; style?: string }[];
-  allowed: string[];
-  createdAt: number;
-}
-
-export interface WebTool {
-  name: string;
-  kind: 'stdio' | 'http';
-  target: string;
-  oauth: 'signed-in' | 'signed-out' | 'not-oauth';
-  tools?: number;
-  error?: string;
-}
-
-/** What the dashboard needs from the bridge. */
-export interface WebBackend {
-  status(): Promise<unknown>;
-  webSessions(): Promise<WebSession[]>;
-  webTrace(sessionKey: string | undefined, limit: number): Promise<{ ts: number; session: string; kind: string; actor: string; detail: string }[]>;
-  webChoices(): WebChoice[];
-  /** Decide a pending choice as the bridge owner; throws when the owner may not decide it. */
-  webDecide(id: string, value: string): string;
-  /** preview: what would happen; otherwise do it (queued behind the conversation's turns). */
-  webWorkspace(key: string, action: 'merge' | 'discard', preview: boolean): Promise<string>;
-  webTools(): Promise<WebTool[]>;
-  /** The bridge.yaml change waiting for an owner, if any. */
-  webConfig(): { pending: PendingConfig | null };
-  /** Apply (or reject) the config file whose text has `sha`, as the owner. */
-  webConfigDecide(sha: string, action: 'apply' | 'reject', via: 'web' | 'cli'): { changes: ConfigChange[] };
-  oauth: OAuthFlows;
+/** What the dashboard serves: the running bridge, the config file's gate, and the person it acts as. */
+export interface Dashboard {
+  bridge: Bridge;
+  /** Absent when no config file is watched (nothing to apply). */
+  gate?: ConfigGate;
+  /** The person the dashboard decides as: this machine's owner. Throws when there is none. */
+  owner(): string;
 }
 
 /**
@@ -60,7 +17,8 @@ export interface WebBackend {
  * Loopback only. Requests must name this host (no DNS rebinding), and writes must be same-origin JSON
  * (other sites can't send that without a CORS preflight, which this server never grants).
  */
-export async function handleWeb(b: WebBackend, req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+export async function handleWeb(d: Dashboard, req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  const b = d.bridge;
   const path = url.pathname;
   const ours = path === '/' || path.startsWith('/api/') || path.startsWith('/oauth/');
   if (!ours) return false;
@@ -94,28 +52,42 @@ export async function handleWeb(b: WebBackend, req: IncomingMessage, res: Server
       return json(res, 200, { status: b.oauth.status(signIn[1]!), last: b.oauth.lastResult(signIn[1]!) ?? null });
     }
     if (path === '/api/overview' && req.method === 'GET') {
-      return json(res, 200, { status: await b.status(), sessions: await b.webSessions(), choices: b.webChoices(), config: b.webConfig() });
+      return json(res, 200, {
+        status: await b.status(),
+        sessions: await b.sessions(),
+        choices: b.pendingChoices(),
+        config: { pending: d.gate?.pending() ?? null },
+      });
     }
     if (path === '/api/trace' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 200) || 200, 2000);
-      return json(res, 200, await b.webTrace(url.searchParams.get('session') ?? undefined, limit));
+      return json(res, 200, await b.auditTrail({ sessionKey: url.searchParams.get('session') ?? undefined, limit }));
     }
-    if (path === '/api/tools' && req.method === 'GET') return json(res, 200, await b.webTools());
-    if (path === '/api/config' && req.method === 'GET') return json(res, 200, b.webConfig());
+    if (path === '/api/tools' && req.method === 'GET') return json(res, 200, await b.toolServers());
 
     if (req.method === 'POST') {
       const body = (await readJson(req)) as Record<string, unknown>;
       const choice = /^\/api\/choices\/([\w-]+)$/.exec(path);
-      if (choice) return json(res, 200, { outcome: b.webDecide(choice[1]!, String(body.value ?? '')) });
+      if (choice) {
+        b.decide(choice[1]!, String(body.value ?? ''), d.owner(), 'web');
+        return json(res, 200, { ok: true });
+      }
       const ws = /^\/api\/sessions\/(merge|discard)$/.exec(path);
       if (ws) {
-        const key = String(body.key ?? '');
-        return json(res, 200, { text: await b.webWorkspace(key, ws[1] as 'merge' | 'discard', body.preview === true) });
+        const opts = { preview: body.preview === true, person: d.owner(), via: 'web' };
+        return json(res, 200, { text: await b.branchAction(String(body.key ?? ''), ws[1] as 'merge' | 'discard', opts) });
       }
       const config = /^\/api\/config\/(apply|reject)$/.exec(path);
       if (config) {
-        const via = body.via === 'cli' ? 'cli' : 'web';
-        return json(res, 200, b.webConfigDecide(String(body.sha ?? ''), config[1] as 'apply' | 'reject', via));
+        // `bridge check --apply` posts here too, as whoever runs it on this machine.
+        if (!d.gate) throw new Error('this bridge does not watch a config file');
+        const sha = String(body.sha ?? '');
+        const by = `${d.owner()} (${body.via === 'cli' ? 'cli' : 'web'})`;
+        if (config[1] === 'reject') {
+          d.gate.reject(sha, by);
+          return json(res, 200, { changes: [] });
+        }
+        return json(res, 200, { changes: d.gate.confirm(sha, by) });
       }
       if (path === '/api/oauth/sign-out') {
         b.oauth.signOut(String(body.server ?? ''));
@@ -152,6 +124,3 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
 }
-
-/** The base URL for this machine's browser (a wildcard bind address isn't one). */
-export { localBaseUrl } from '../core/address.ts';

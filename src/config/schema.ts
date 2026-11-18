@@ -27,10 +27,15 @@ const Person = z
     trust: z.enum(TRUST_LEVELS).default('member'),
     slack: z.string().optional(),
     telegram: z.string().optional(),
-    discord: z.string().optional(),
     feishu: z.string().optional(),
   })
   .strict();
+export type Person = z.infer<typeof Person>;
+
+/** A person's user id on an IM (`local`, the console, has none: people are named directly there). */
+export function personIdOn(person: Person, platform: string): string | undefined {
+  return platform === 'slack' || platform === 'telegram' || platform === 'feishu' ? person[platform] : undefined;
+}
 
 const SlackConfig = z
   .object({ app_token: SecretRef, bot_token: SecretRef })
@@ -169,20 +174,24 @@ export type HttpToolServerConfig = z.infer<typeof HttpToolServer>;
 
 const OneOrMany = z.union([z.string(), z.array(z.string()).min(1)]);
 
-const RouteWhen = z
-  .object({
+const RouteWhen = z.strictObject(
+  {
     /**
-     * `true`: the bot must be @-mentioned (DMs always count as mentioned). `<agent>`: the bot is mentioned and
-     * the message starts with this agent's name. `false`: no mention needed, like `listen: all`.
-     * Unset: mention needed in channels unless `listen: all`. Thread replies to the agent never need one.
+     * `true` (or unset): in a channel the bot must be @-mentioned; DMs always count as mentioned. `<agent>`: the
+     * bot is mentioned and the message starts with this agent's name. `false`: every message in the channel,
+     * no mention needed. Replies in a thread the agent holds never need one.
      */
     mention: z.union([z.boolean(), z.string()]).optional(),
-    /** `all`: every message in the channel goes to the agent, no mention needed. */
-    listen: z.enum(['all', 'mention']).optional(),
     /** Person ids from `people`, or `anyone`. */
     sender: z.union([z.literal('anyone'), z.array(z.string()).min(1)]).optional(),
-  })
-  .strict();
+  },
+  {
+    error: (iss) =>
+      iss.code === 'unrecognized_keys' && iss.keys.includes('listen')
+        ? 'when.listen is not a setting: write mention: false for every message in the channel'
+        : undefined,
+  },
+);
 
 export const Route = z
   .object({
@@ -204,6 +213,7 @@ export const Policy = z
       })
       .strict(),
     approve_by: z.array(z.string()).optional(),
+    /** How long an approval waits (default 10m). */
     timeout: TimerDuration.optional(),
     max_hops: z.number().int().positive().optional(),
     budget_usd: z.number().positive().optional(),
@@ -227,16 +237,7 @@ const Defaults = z
     retention: z.union([z.literal('off'), Duration]).default('30d'),
   })
   .strict()
-  .default({
-    dm_idle_reset: '2h',
-    offline_queue_ttl: '24h',
-    progress: 'collapsed',
-    max_hops: 4,
-    max_file_mb: 20,
-    files_ttl: '7d',
-    worktree_prune_after: '7d',
-    retention: '30d',
-  });
+  .prefault({});
 
 /**
  * Assertions about the routing this file sets up, checked whenever it is loaded: a file whose tests fail is not
@@ -273,7 +274,7 @@ const Server = z
     data_dir: z.string().default('.bridge'),
   })
   .strict()
-  .default({ host: '127.0.0.1', port: 7377, data_dir: '.bridge' });
+  .prefault({});
 
 export const BridgeConfig = z
   .object({

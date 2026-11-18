@@ -72,8 +72,8 @@ User-facing docs are in [README.md](README.md); design notes and references live
   say so and leave the code as it was rather than half-fixing it.
 - **Optimise for the long term.** Prefer the design that stays simple and correct as the code grows over the
   one that is quickest to type. Fix the root cause, not the symptom; remove code that the change made dead.
-- **Behaviour, comments and docs agree.** When behaviour changes, update the comment, the README and the
-  tests in the same commit.
+- **Behaviour, comments and docs agree.** When behaviour changes, update the comment, the docs (README for CLI
+  users, doc/ for config, agents and the library) and the tests in the same commit.
 - Review your own diff before committing as a strict reviewer would.
 
 ## Layout
@@ -87,9 +87,10 @@ src/                     all source code
   config/                bridge.yaml schema (zod), checks with line numbers, tests, change review
   core/                  router, policies, SQLite store, the Bridge orchestrator
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
-  web/                   local dashboard: JSON API + one self-contained page
+  web/                   the CLI's dashboard (JSON API + one self-contained page), built on Bridge's public methods
   adapters/im/           Slack, Feishu / Lark, Telegram, local console (+ Markdown renderers)
-  adapters/agent/        webhook (remote); claude-code and codex (with git worktrees) and stdio (local, opt-in)
+  adapters/agent/        webhook (remote); claude-code and codex (cli-agent.ts: worktrees, process groups) and stdio
+                         (local, opt-in); protocol.ts is the webhook / stdio wire format
   examples/              example agents (shipped)
   test/                  node:test suites, helpers and fixtures (not shipped)
 doc/                     documentation and reference files (bridge.schema.json is generated: `bridge schema`)
@@ -100,6 +101,8 @@ tmp/                     scratch files, one-off scripts, handoffs (git-ignored)
 
 The library (`src/index.ts` and what it loads) never reads files it wasn't given, the keychain or the dashboard,
 and never runs local agents unless the app passes `localAgents`; `src/test/library.test.ts` checks the import graph.
+`Bridge` knows nothing of the CLI: no dashboard routes, no config file, no `bridge …` commands in its messages; the CLI
+builds those on its public methods.
 Everything that is code lives under `src/`. Documentation goes in `doc/`, except `README.md` and this file.
 What the project deliberately does not do is listed under "Not planned" in the README.
 

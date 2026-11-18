@@ -17,7 +17,7 @@ export interface InboundMessage {
   /** Root message id of the thread this message belongs to (its own id if it starts one). */
   threadId: string;
   messageId: string;
-  /** Attachments; the bridge downloads them before the turn is queued. */
+  /** Attachments; the bridge downloads them when the turn runs. */
   files?: InboundFile[];
 }
 
@@ -98,8 +98,8 @@ export class Router {
       }
       // A reply in a thread the agent already holds continues it without a fresh mention or address.
       const continuing = ctx.threadAgent === agent;
-      const { mention, listen } = route.when;
-      const needsMention = mention === undefined ? listen !== 'all' : mention !== false;
+      const { mention } = route.when;
+      const needsMention = mention !== false;
       if (needsMention && !(msg.isDM || msg.mentioned) && !continuing) {
         trace.push(`${label}: bot not mentioned`);
         continue;

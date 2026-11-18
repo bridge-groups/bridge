@@ -150,7 +150,7 @@ button:disabled { opacity: .5; cursor: default; }
   function clock(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
   function money(n) { return '$' + (n || 0).toFixed(2); }
 
-  var PLATFORM = { slack: 'Slack', feishu: 'Lark', telegram: 'Telegram', discord: 'Discord', local: 'Terminal' };
+  var PLATFORM = { slack: 'Slack', feishu: 'Feishu / Lark', telegram: 'Telegram', local: 'Terminal' };
   function describeKey(key) {
     var p = key.split(':');
     var name = PLATFORM[p[0]] || p[0];
@@ -320,7 +320,7 @@ button:disabled { opacity: .5; cursor: default; }
       if (kind === 'command') return { text: d.command };
       if (kind === 'config') return { text: d.outcome + ' ' + d.sha + (d.by ? ' by ' + d.by : ''), raw: (d.changes || []).map(changeLine).join('\n') };
       if (kind === 'budget') return { text: 'turn not started: ' + money(d.leftUsd) + ' of ' + money(d.budgetUsd) + ' left' + (d.cheapestTurnUsd != null ? ', cheapest recent turn ' + money(d.cheapestTurnUsd) : '') };
-      if (kind === 'error') return { text: d.message || d.error || detail };
+      if (kind === 'error') return { text: d.message || detail };
     }
     return { text: '', raw: JSON.stringify(d, null, 2) };
   }

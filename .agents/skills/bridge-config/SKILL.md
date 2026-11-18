@@ -10,12 +10,11 @@ the behaviour the user relies on, and the user knows which changes wait for thei
 
 1. Read the user's `bridge.yaml` and [doc/config.md](../../../doc/config.md). The schema with every key and default
    is `doc/bridge.schema.json`; `bridge schema` prints it.
-2. Make the smallest edit that does what was asked. Keep comments and ordering. Routes match top to bottom, so
-   put a new route where it wins only for the messages it is meant for.
+2. Make the smallest edit that does what was asked. Keep comments and ordering, and follow the routing and policy
+   rules in doc/config.md (a new route goes where it wins only for the messages it is meant for).
 3. Never write a credential into the file. If one is needed, tell the user to run
    `bridge secret set <name>` themselves (the value goes in on stdin) and reference it as `secret:<name>`.
-4. A route from IM to an agent on this machine needs `when.sender`. Name people, not `anyone`, unless the user
-   asked for anyone.
+4. Name people in `when.sender`, not `anyone`, unless the user asked for anyone.
 5. Add or update `tests` for what the user relies on, including who must not get through
    (`expect: none`, `expect: deny`).
 6. Run `bridge check` (from a checkout: `node src/cli.ts check -c <path>`; add `--json` for structured output)

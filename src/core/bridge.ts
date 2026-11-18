@@ -1,5 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { BridgeConfig, TrustLevel } from '../config/schema.ts';
+import { personIdOn, type BridgeConfig, type TrustLevel } from '../config/schema.ts';
 import { remoteAgents, type AgentFactory } from '../adapters/agent/index.ts';
 import type { AgentAdapter, AgentReply, Workspace } from '../adapters/agent/types.ts';
 import type { Choice, ImAdapter, InboundAction } from '../adapters/im/types.ts';
@@ -7,9 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { McpHub, type HubBackend, type SessionGrant, type ToolResult } from '../mcp/hub.ts';
 import { ToolHub } from '../mcp/tools.ts';
 import { memoryStorage, OAuthFlows, watchTokens, type OAuthStorage } from '../mcp/oauth.ts';
-import type { WebBackend, WebChoice, WebSession, WebTool } from '../web/api.ts';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
-import { localBaseUrl, parseDuration, sessionSlug } from './address.ts';
+import { dmKey, isDmKey, localBaseUrl, parseDuration, sessionSlug } from './address.ts';
 import { minTrust, newEnvelope, type ContentBlock, type Envelope } from './envelope.ts';
 import { PolicyEngine } from './policy.ts';
 import { Router, type InboundFile, type InboundMessage } from './router.ts';
@@ -20,8 +19,6 @@ import { isDeepStrictEqual } from 'node:util';
 import type { BridgeStore } from './store.ts';
 import { Redactor } from './redact.ts';
 import { envSecrets, type SecretResolver } from './secrets.ts';
-import { describeChanges } from '../config/changes.ts';
-import type { ConfigGate, PendingConfig } from '../config/gate.ts';
 
 interface ThreadRef {
   platform: string;
@@ -92,13 +89,63 @@ export interface BridgeOptions {
    */
   mcpBaseUrl?: string;
   /**
-   * More routes on the server the bridge listens on itself (no mcpBaseUrl): the CLI's dashboard. Return false
-   * to answer 404.
+   * More routes on the server the bridge listens on itself (no mcpBaseUrl), such as a dashboard built on
+   * `sessions`, `pendingChoices` and the other methods for the app. Return false to answer 404.
    */
   extraRoutes?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
   /** Where attachments are downloaded (default: a temp dir). */
   filesDir?: string;
-  log?: (line: string) => void;
+  /** Where log lines go (default: the console); `error` marks failures someone should look at. */
+  log?: (line: string, level: 'info' | 'error') => void;
+}
+
+/** A conversation, for the app (see `Bridge.sessions`). */
+export interface SessionInfo {
+  key: string;
+  agent: string;
+  platform: string;
+  initiator: string;
+  createdAt: number;
+  lastActive: number;
+  spentUsd: number;
+  /** A turn is running or queued. */
+  busy: boolean;
+  /** The branch's status (name, unmerged commits, diffstat), when the agent keeps one and it exists. */
+  branch?: string;
+  /** The branch has commits that can be squash-merged now. */
+  canMerge?: boolean;
+}
+
+/** One audit trail entry; `detail` is redacted JSON. */
+export interface AuditEntry {
+  ts: number;
+  session: string;
+  kind: string;
+  actor: string;
+  detail: string;
+}
+
+/** An approval or confirmation waiting for one of `allowed`. */
+export interface PendingChoice {
+  id: string;
+  /** The conversation it was asked in. */
+  key: string;
+  text: string;
+  choices: { label: string; value: string; style?: string }[];
+  allowed: string[];
+  createdAt: number;
+}
+
+/** A tool server and whether it answers. */
+export interface ToolServerInfo {
+  name: string;
+  kind: 'stdio' | 'http';
+  /** Its URL, or its command line. */
+  target: string;
+  oauth: 'signed-in' | 'signed-out' | 'not-oauth';
+  /** How many tools it offers, when it answered. */
+  tools?: number;
+  error?: string;
 }
 
 const APPROVE = /^(approve|approved|yes|y|ok|lgtm|批准|同意|可以|确认|好|好的|是)$/i;
@@ -111,19 +158,25 @@ const COMMANDS = new Map<string, 'status' | 'merge' | 'discard' | 'pr'>([
   ['discard', 'discard'], ['丢弃', 'discard'], ['放弃', 'discard'],
 ]);
 
-/** How long the IM buttons for a pending config change stay open (the change itself waits until decided). */
-const CONFIG_ASK_MS = 24 * 3600_000;
-
 /** ask_human waits between 1 minute and 1 day, whatever the agent asks for. */
 const ASK_MINUTES = { default: 30, min: 1, max: 24 * 60 };
 
-/** How long the dashboard reuses a conversation's branch status (git is slow); turn ends and merges refresh it. */
+/** How long `sessions` reuses a conversation's branch status (git is slow); turn ends and merges refresh it. */
 const BRANCH_CACHE_MS = 30e3;
-/** The dashboard looks up branches for at most this many of the most recent conversations. */
+/** `sessions` looks up branches for at most this many of the most recent conversations. */
 const BRANCH_LOOKUPS = 30;
+/** How long `toolServers` waits for each server's tool list. */
+const TOOL_STATUS_MS = 10e3;
+/** Housekeeping runs this often, and first this long after start. */
+const HOUSEKEEPING_MS = 6 * 3600e3;
+const FIRST_HOUSEKEEPING_MS = 60e3;
+/** At most one progress edit of a turn's placeholder message per this interval (IM rate limits). */
+const PROGRESS_EDIT_MS = 1500;
+/** How long a merge / discard / pr confirmation in the chat waits. */
+const CONFIRM_MS = 10 * 60e3;
 const DENY = /^(deny|denied|no|n|reject|拒绝|不行)$/i;
 
-export class Bridge implements HubBackend, WebBackend {
+export class Bridge implements HubBackend {
   private cfg: BridgeConfig;
   private router: Router;
   private policies: PolicyEngine;
@@ -133,7 +186,7 @@ export class Bridge implements HubBackend, WebBackend {
   private readonly injectedAgents: Set<string>;
   private readonly tools: ToolHub;
   private readonly hub: McpHub;
-  private readonly log: (line: string) => void;
+  private readonly logLine: (line: string, level: 'info' | 'error') => void;
   private readonly chains = new Map<string, Promise<void>>();
   /** Inbound messages still being handled before they reach a chain. */
   private readonly inflight = new Set<Promise<unknown>>();
@@ -159,11 +212,10 @@ export class Bridge implements HubBackend, WebBackend {
       text: string;
       options: Choice[];
       at: number;
-      /** Shown on the dashboard's list of choices (config changes have a section of their own). */
+      /** Listed by `pendingChoices` (questions from `askInDms` are not). */
       listed: boolean;
     }
   >();
-  private configGate?: ConfigGate;
   private readonly redactor: Redactor;
   private readonly secrets: SecretResolver;
   private readonly agentFactory: AgentFactory;
@@ -186,7 +238,7 @@ export class Bridge implements HubBackend, WebBackend {
   /** Set by stop(): no new turns start, and interrupted ones stay queued to resume on the next start. */
   private stopping = false;
   /** Queued work waits for this, so nothing runs before the IMs are connected. */
-  private readonly ready = deferred<void>();
+  private readonly ready = Promise.withResolvers<void>();
 
   constructor(opts: BridgeOptions) {
     this.cfg = opts.cfg;
@@ -213,10 +265,10 @@ export class Bridge implements HubBackend, WebBackend {
     this.tools = opts.tools ?? new ToolHub(opts.cfg.tools, { secrets: this.secrets, oauth: { storage: oauthStorage, redirectUrl } });
     this.oauth = new OAuthFlows(() => this.cfg.tools, oauthStorage, redirectUrl, this.secrets, (server) => {
       this.trace('-', 'oauth', 'web', { server, signedIn: this.oauth.status(server) === 'signed-in' });
-      this.tools.reset(server).catch((err) => this.log(`tool server ${server} not reset: ${(err as Error).message}`));
+      this.tools.reset(server).catch((err) => this.warn(`tool server ${server} not reset: ${(err as Error).message}`));
     });
     this.hub = new McpHub(this, () => this.baseUrl());
-    this.log = opts.log ?? ((l) => console.log(l));
+    this.logLine = opts.log ?? ((l, level) => (level === 'error' ? console.error(l) : console.log(l)));
     this.filesDir = opts.filesDir ?? join(tmpdir(), 'bridge-files');
   }
 
@@ -232,16 +284,16 @@ export class Bridge implements HubBackend, WebBackend {
     await this.replayQueue();
     for (const im of this.ims.values()) {
       await im.start(
-        (msg) => this.track(this.handleInbound(msg).catch((e) => this.log(`inbound error: ${e?.stack ?? e}`))),
-        (action) => this.track(this.handleAction(action).catch((e) => this.log(`action error: ${e?.stack ?? e}`))),
+        (msg) => this.track(this.handleInbound(msg).catch((e) => this.warn(`inbound error: ${e?.stack ?? e}`))),
+        (action) => this.track(this.handleAction(action).catch((e) => this.warn(`action error: ${e?.stack ?? e}`))),
       );
       this.log(`connected ${im.platform}`);
     }
     this.startedAt = Date.now();
     this.ready.resolve();
-    this.housekeeping = setInterval(() => void this.cleanUp(), 6 * 3600e3);
+    this.housekeeping = setInterval(() => void this.cleanUp(), HOUSEKEEPING_MS);
     this.housekeeping.unref();
-    this.firstCleanUp = setTimeout(() => void this.cleanUp(), 60e3);
+    this.firstCleanUp = setTimeout(() => void this.cleanUp(), FIRST_HOUSEKEEPING_MS);
     this.firstCleanUp.unref();
     return { mcpUrl };
   }
@@ -257,9 +309,11 @@ export class Bridge implements HubBackend, WebBackend {
     this.ready.resolve();
     for (const ctx of this.active.values()) ctx.controller.abort();
     for (const list of [...this.waiters.values()]) for (const w of [...list]) w.cancel('the bridge is shutting down');
-    for (const a of new Set([...this.agents.values(), ...this.retiring])) await a.stop?.().catch(() => {});
+    for (const a of new Set([...this.agents.values(), ...this.retiring])) {
+      await a.stop?.().catch((err) => this.warn(`stopping agent ${a.name} failed: ${(err as Error).message}`));
+    }
     await this.idle();
-    for (const im of this.ims.values()) await im.stop().catch(() => {});
+    for (const im of this.ims.values()) await im.stop().catch((err) => this.warn(`disconnecting ${im.platform} failed: ${(err as Error).message}`));
     await this.tools.stop();
     await new Promise<void>((resolve) => (this.http ? this.http.close(() => resolve()) : resolve()));
     await this.flushWrites();
@@ -284,7 +338,7 @@ export class Bridge implements HubBackend, WebBackend {
       this.retire(agent);
     }
     this.branchCache.clear();
-    this.tools.update(cfg.tools).catch((err) => this.log(`tool servers not updated: ${(err as Error).message}`));
+    this.tools.update(cfg.tools).catch((err) => this.warn(`tool servers not updated: ${(err as Error).message}`));
     this.log('config reloaded');
   }
 
@@ -294,7 +348,7 @@ export class Bridge implements HubBackend, WebBackend {
       return;
     }
     this.retiring.delete(adapter);
-    adapter.stop?.().catch((err) => this.log(`stopping replaced agent ${adapter.name} failed: ${(err as Error).message}`));
+    adapter.stop?.().catch((err) => this.warn(`stopping replaced agent ${adapter.name} failed: ${(err as Error).message}`));
   }
 
   /** Wait until every queued turn has finished (tests, graceful shutdown). */
@@ -315,7 +369,7 @@ export class Bridge implements HubBackend, WebBackend {
   async handleInbound(msg: InboundMessage) {
     const person = this.person(msg.platform, msg.userId);
     const thread: ThreadRef = { platform: msg.platform, channelId: msg.channelId, threadId: msg.threadId, isDM: msg.isDM };
-    const key = msg.isDM ? `${msg.platform}:dm:${msg.userId}` : `${msg.platform}:${msg.channelId}:${msg.threadId}`;
+    const key = msg.isDM ? dmKey(msg.platform, msg.userId) : `${msg.platform}:${msg.channelId}:${msg.threadId}`;
 
     // Someone not in `people` is known by their platform id, the same id their turns use as initiator.
     const senderId = person?.id ?? `${msg.platform}:${msg.userId}`;
@@ -335,7 +389,7 @@ export class Bridge implements HubBackend, WebBackend {
 
     const match = this.router.matchInbound(msg, { personId: person?.id, threadAgent: session?.agent });
     if (!match) {
-      this.trace(key, 'ignored', person?.id ?? `${msg.platform}:${msg.userId}`, { text: msg.text });
+      this.trace(key, 'ignored', senderId, { text: msg.text });
       if (!person && (msg.isDM || msg.mentioned)) {
         this.log(`ignored ${msg.platform} user ${msg.userId} — not in people: (add  ${msg.platform}: ${msg.userId}  to a person)`);
       }
@@ -388,7 +442,7 @@ export class Bridge implements HubBackend, WebBackend {
         text: prompt,
         choices: [action, { label: 'Cancel', value: 'cancel' }],
         allowed: [who],
-        timeoutMs: 10 * 60e3,
+        timeoutMs: CONFIRM_MS,
         typedHint: 'Reply `yes` to go ahead; anything else cancels.',
         typed: (t) => (APPROVE.test(t) ? action.value : 'cancel'),
         outcome: (r) => (!r ? '⌛ No answer in 10 minutes — cancelled.' : r.value === 'cancel' ? `Cancelled by ${r.by}.` : `${action.label} — confirmed by ${r.by}.`),
@@ -397,7 +451,9 @@ export class Bridge implements HubBackend, WebBackend {
     };
     try {
       if (command === 'status') {
-        await this.send(thread, (await ws.status(key)) ?? 'This conversation has no branch yet — it gets one with the first change.');
+        const status = await ws.status(key);
+        const hint = `Reply \`merge\` to squash it into the base branch${ws.pr ? ', `pr` to open a pull request,' : ''} or \`discard\` to throw it away.`;
+        await this.send(thread, status ? `${status}\n${hint}` : 'This conversation has no branch yet — it gets one with the first change.');
       } else if (command === 'pr') {
         if (!ws.previewPr || !ws.pr) {
           return void (await this.send(thread, '⚠️ No git token is configured for this agent — add `git_token` to it in bridge.yaml.'));
@@ -440,7 +496,7 @@ export class Bridge implements HubBackend, WebBackend {
     const prev = this.chains.get(key) ?? this.ready.promise;
     const next = prev
       .then(fn)
-      .catch((err) => this.log(`error in ${key}: ${(err as Error)?.stack ?? err}`))
+      .catch((err) => this.warn(`error in ${key}: ${(err as Error)?.stack ?? err}`))
       .finally(() => {
         if (this.chains.get(key) === next) this.chains.delete(key);
       });
@@ -480,14 +536,12 @@ export class Bridge implements HubBackend, WebBackend {
     // Shutting down: leave it queued (pending or running), the next start picks it up.
     if (this.stopping) return;
     await this.store.markRunning(job.envelope.id, job);
-    let session = await this.store.getSession(sessionKey);
-    if (session && session.agent !== agent) {
-      await this.store.updateSession(sessionKey, { agent_session_id: null });
-    }
-    session = await this.store.upsertSession({
+    const previous = await this.store.getSession(sessionKey);
+    // Another agent's session id means nothing to this one: it starts fresh.
+    const session = await this.store.upsertSession({
       key: sessionKey,
       agent,
-      agent_session_id: session?.agent === agent ? session.agent_session_id : null,
+      agent_session_id: previous?.agent === agent ? previous.agent_session_id : null,
       platform: thread.platform,
       channel_id: thread.channelId,
       thread_id: thread.threadId,
@@ -505,6 +559,7 @@ export class Bridge implements HubBackend, WebBackend {
     // so a late edit can never overwrite the reply. Edits run one after another, in order.
     let finished = false;
     let edits = Promise.resolve();
+    let editFailed = false;
     const steps: string[] = [];
     const render = () =>
       progress === 'verbose'
@@ -515,14 +570,18 @@ export class Bridge implements HubBackend, WebBackend {
       if (finished || !placeholder || !edit) return;
       lastEdit = Date.now();
       const [id, text] = [placeholder, render()];
-      edits = edits.then(() => edit(thread.channelId, id, text)).catch(() => {});
+      edits = edits.then(() => edit(thread.channelId, id, text)).catch((err) => {
+        // The reply still replaces the placeholder (or is posted fresh) when the turn ends.
+        if (!editFailed) this.warn(`progress edit in ${sessionKey} failed: ${(err as Error).message}`);
+        editFailed = true;
+      });
     };
     const onProgress = (line: string) => {
       if (finished) return;
       this.trace(sessionKey, 'progress', agent, { line });
       steps.push(line);
       if (!placeholder || !edit || pending) return;
-      const wait = 1500 - (Date.now() - lastEdit);
+      const wait = PROGRESS_EDIT_MS - (Date.now() - lastEdit);
       if (wait <= 0) flush();
       else pending = setTimeout(flush, wait); // last step still shows even when steps arrive fast
     };
@@ -532,7 +591,7 @@ export class Bridge implements HubBackend, WebBackend {
       if (progress !== 'off' && im) {
         // Without a placeholder the turn still runs; the reply is posted fresh.
         placeholder = await this.send(thread, `⏳ ${agent} is working…`).catch((err) => {
-          this.log(`progress message to ${sessionKey} not delivered: ${(err as Error).message}`);
+          this.warn(`progress message to ${sessionKey} not delivered: ${(err as Error).message}`);
           return undefined;
         });
       }
@@ -554,15 +613,17 @@ export class Bridge implements HubBackend, WebBackend {
     }
 
     if (outcome.ok) {
-      await this.post(thread, outcome.text, placeholder).catch((err) => this.log(`reply to ${sessionKey} not delivered: ${(err as Error).message}`));
+      await this.post(thread, outcome.text, placeholder).catch((err) => this.warn(`reply to ${sessionKey} not delivered: ${(err as Error).message}`));
       await this.store.finish(job.envelope.id, 'done');
     } else if (this.stopping) {
       // Cut off by shutdown: the queue row stays `running`, so the next start resumes the turn.
       this.trace(sessionKey, 'interrupted', agent, { message: outcome.message });
-      await this.post(thread, `⏸ ${agent}'s turn was interrupted by a bridge shutdown — it resumes when the bridge is back.`, placeholder).catch(() => {});
+      await this.post(thread, `⏸ ${agent}'s turn was interrupted by a bridge shutdown — it resumes when the bridge is back.`, placeholder).catch((err) =>
+        this.warn(`interruption notice to ${sessionKey} not delivered: ${(err as Error).message}`),
+      );
     } else {
       this.trace(sessionKey, 'error', agent, { message: outcome.message });
-      await this.post(thread, `⚠️ ${agent} failed: ${outcome.message}`, placeholder).catch((err) => this.log(`error report to ${sessionKey} not delivered: ${(err as Error).message}`));
+      await this.post(thread, `⚠️ ${agent} failed: ${outcome.message}`, placeholder).catch((err) => this.warn(`error report to ${sessionKey} not delivered: ${(err as Error).message}`));
       await this.store.finish(job.envelope.id, 'failed');
     }
   }
@@ -651,7 +712,6 @@ export class Bridge implements HubBackend, WebBackend {
     return out;
   }
 
-  /** Periodic housekeeping: expire downloaded files, prune idle conversation worktrees. */
   /**
    * Periodic housekeeping: expire downloaded files, prune idle conversation worktrees, and drop old queue rows,
    * trace entries and sessions. Never throws: every step is logged and the rest still runs.
@@ -661,7 +721,7 @@ export class Bridge implements HubBackend, WebBackend {
       try {
         await fn();
       } catch (err) {
-        this.log(`housekeeping: ${what} failed: ${(err as Error)?.message ?? err}`);
+        this.warn(`housekeeping: ${what} failed: ${(err as Error)?.message ?? err}`);
       }
     };
     const { defaults } = this.cfg;
@@ -672,9 +732,11 @@ export class Bridge implements HubBackend, WebBackend {
       const isIdle = (slug: string) => !recent.has(slug);
       for (const name of Object.keys(this.cfg.agents)) {
         await step(`worktree prune for ${name}`, async () => {
-          const { removed, errors } = (await this.agent(name).workspace?.prune?.(isIdle)) ?? { removed: [], errors: [] };
+          const ws = this.agent(name).workspace;
+          if (!ws) return;
+          const { removed, errors } = await ws.prune(isIdle);
           for (const b of removed) this.log(`pruned idle worktree ${b}`);
-          for (const e of errors) this.log(`housekeeping: worktree prune for ${name}: ${e}`);
+          for (const e of errors) this.warn(`housekeeping: worktree prune for ${name}: ${e}`);
         });
       }
     }
@@ -707,7 +769,7 @@ export class Bridge implements HubBackend, WebBackend {
         if (!readdirSync(dir).length) rmdirSync(dir);
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        if (code !== 'ENOTEMPTY' && code !== 'ENOENT') this.log(`housekeeping: ${dir}: ${(err as Error).message}`);
+        if (code !== 'ENOTEMPTY' && code !== 'ENOENT') this.warn(`housekeeping: ${dir}: ${(err as Error).message}`);
       }
     }
   }
@@ -757,7 +819,7 @@ export class Bridge implements HubBackend, WebBackend {
   private later(write: () => unknown) {
     this.writes = this.writes.then(write).then(
       () => undefined,
-      (err) => this.log(`state write failed: ${(err as Error)?.message ?? err}`),
+      (err) => this.warn(`state write failed: ${(err as Error)?.message ?? err}`),
     );
   }
 
@@ -857,7 +919,7 @@ export class Bridge implements HubBackend, WebBackend {
       try {
         list = await this.tools.listTools(server);
       } catch (err) {
-        this.log(`tool server ${server} unavailable: ${(err as Error).message}`);
+        this.warn(`tool server ${server} unavailable: ${(err as Error).message}`);
         continue;
       }
       for (const t of list) {
@@ -1030,12 +1092,13 @@ export class Bridge implements HubBackend, WebBackend {
     };
   }
 
-  // ───────────────────────── dashboard ─────────────────────────
+  // ───────────────────────── for the app: conversations, choices, branches, tools ─────────────────────────
 
-  async webSessions(): Promise<WebSession[]> {
+  /** Recent conversations, most recently active first, with the branch status of agents that keep one. */
+  async sessions(limit = 200): Promise<SessionInfo[]> {
     const busy = new Set([...this.active.values()].map((c) => c.rootKey));
     let lookups = 0;
-    return Promise.all((await this.store.listSessions(200)).map(async (s) => {
+    return Promise.all((await this.store.listSessions(limit)).map(async (s) => {
       // Branch status runs git, so only the most recent conversations of agents with branches get it, and
       // it is cached briefly (turn ends, merges and discards refresh it).
       const ws = Object.hasOwn(this.cfg.agents, s.agent) ? this.agent(s.agent).workspace : undefined;
@@ -1060,11 +1123,10 @@ export class Bridge implements HubBackend, WebBackend {
     if (cached && Date.now() - cached.at < BRANCH_CACHE_MS) return cached;
     let info: { branch?: string; canMerge: boolean };
     try {
-      // The chat hint ("Reply `merge` …") is for IM; the dashboard has buttons.
-      const branch = (await ws.status(key))?.split(/\nReply `/)[0]?.trim();
+      const branch = await ws.status(key);
       info = { branch, canMerge: !!branch && (await ws.previewMerge(key)).ok };
     } catch (err) {
-      this.log(`branch status for ${key} failed: ${(err as Error).message}`);
+      this.warn(`branch status for ${key} failed: ${(err as Error).message}`);
       info = { canMerge: false };
     }
     for (const [k, v] of this.branchCache) if (Date.now() - v.at >= BRANCH_CACHE_MS) this.branchCache.delete(k);
@@ -1072,14 +1134,16 @@ export class Bridge implements HubBackend, WebBackend {
     return info;
   }
 
-  async webTrace(sessionKey: string | undefined, limit: number) {
+  /** The audit trail, newest first: one conversation's, or everything. Details are redacted JSON. */
+  async auditTrail(opts: { sessionKey?: string; limit: number }): Promise<AuditEntry[]> {
     await this.flushWrites();
-    return (await this.store.readTrace({ sessionKey, limit }))
-      .reverse() // newest first
+    return (await this.store.readTrace(opts))
+      .reverse()
       .map((t) => ({ ts: t.ts, session: t.session_key, kind: t.kind, actor: t.actor, detail: t.detail }));
   }
 
-  webChoices(): WebChoice[] {
+  /** Approvals and confirmations waiting for someone (questions asked with `askInDms` are not listed). */
+  pendingChoices(): PendingChoice[] {
     return [...this.choices.entries()].filter(([, c]) => c.listed).map(([id, c]) => ({
       id,
       key: c.key,
@@ -1090,107 +1154,28 @@ export class Bridge implements HubBackend, WebBackend {
     }));
   }
 
-  webConfig(): { pending: PendingConfig | null } {
-    return { pending: this.configGate?.pending() ?? null };
-  }
-
-  /** Apply or reject the config file with this sha as the owner (dashboard or `bridge check --apply`). */
-  webConfigDecide(sha: string, action: 'apply' | 'reject', via: 'web' | 'cli') {
-    if (!this.configGate) throw new Error('this bridge does not watch a config file');
-    const who = `${this.webPerson()} (${via})`;
-    if (action === 'reject') {
-      this.configGate.reject(sha, who);
-      return { changes: [] };
-    }
-    return { changes: this.configGate.confirm(sha, who) };
-  }
-
-  // ───────────────────────── config changes ─────────────────────────
-
-  /** Changes to bridge.yaml that widen access are applied by `gate` once an owner confirms them. */
-  attachConfigGate(gate: ConfigGate) {
-    this.configGate = gate;
-  }
-
   /**
-   * Ask every owner, in their direct messages with the bot, to apply or reject a config change that widens
-   * access. Whichever answer comes first (here, on the dashboard or from the CLI) settles it everywhere.
+   * Decide a pending choice as `person` (a key of cfg.people), outside the chat. `via` says where (e.g. "web")
+   * for the audit trail. Throws when the choice is gone or the person may not decide it.
    */
-  async askOwnersAboutConfig(pending: PendingConfig, signal: AbortSignal) {
-    const gate = this.configGate;
-    if (!gate) return;
-    const owners = Object.entries(this.cfg.people).filter(([, p]) => p.trust === 'owner');
-    const text = [
-      `⚙️ bridge.yaml changed in a way that widens access (${pending.sha}). Apply it?`,
-      ...describeChanges(pending.changes),
-      '("+" widens access, "-" narrows it, "~" neither)',
-    ].join('\n');
-    let asked = 0;
-    for (const [, person] of owners) {
-      for (const platform of this.ims.keys()) {
-        const userId = (person as Record<string, unknown>)[platform];
-        if (typeof userId !== 'string') continue;
-        const key = `${platform}:dm:${userId}`;
-        const dm = await this.store.getSession(key);
-        if (!dm) continue;
-        asked++;
-        this.choose({
-          key,
-          thread: { platform, channelId: dm.channel_id, threadId: dm.thread_id, isDM: true },
-          text,
-          choices: [
-            { label: 'Apply', value: 'apply', style: 'primary' },
-            { label: 'Reject', value: 'reject', style: 'danger' },
-          ],
-          allowed: owners.map(([id]) => id),
-          timeoutMs: CONFIG_ASK_MS,
-          typedHint: 'Reply "apply" or "reject".',
-          typed: (t) => (/^apply$/i.test(t) ? 'apply' : /^reject$/i.test(t) ? 'reject' : undefined),
-          // Decided here: apply or reject now, so the message shows what really happened.
-          outcome: (r) => {
-            if (!r) return '⌛ No answer — the change still waits: bridge check --apply, or the dashboard.';
-            try {
-              if (r.value === 'reject') {
-                gate.reject(pending.sha, r.by);
-                return `✖ Rejected by ${r.by}; the running config stays.`;
-              }
-              gate.confirm(pending.sha, r.by);
-              return `✅ Applied by ${r.by}.`;
-            } catch (err) {
-              return `⚠️ Not applied: ${(err as Error).message}`;
-            }
-          },
-          signal,
-          unlisted: true,
-        }).catch((err) => this.log(`config confirmation not sent to ${key}: ${(err as Error).message}`));
-      }
-    }
-    if (!asked) this.log('no owner has a direct message with the bot yet: confirm with "bridge check --apply" or the dashboard');
-  }
-
-  /** The dashboard is this machine's owner: the first person with trust owner. */
-  private webPerson(): string {
-    const owner = Object.entries(this.cfg.people).find(([, p]) => p.trust === 'owner')?.[0];
-    if (!owner) throw new Error('no person with trust: owner in bridge.yaml — the dashboard acts as that person');
-    return owner;
-  }
-
-  webDecide(id: string, value: string): string {
+  decide(id: string, value: string, person: string, via: string) {
     const choice = this.choices.get(id);
     if (!choice) throw new Error('this choice has already been decided or has expired');
     if (!choice.options.some((o) => o.value === value)) throw new Error(`"${value}" is not one of the options`);
-    const who = this.webPerson();
-    if (!choice.allowed.has(who)) throw new Error(`only ${[...choice.allowed].join(', ')} can decide this`);
-    choice.settle({ by: `${who} (web)`, value });
-    return 'decided';
+    if (!choice.allowed.has(person)) throw new Error(`only ${[...choice.allowed].join(', ')} can decide this`);
+    choice.settle({ by: `${person} (${via})`, value });
   }
 
-  async webWorkspace(key: string, action: 'merge' | 'discard', preview: boolean): Promise<string> {
+  /**
+   * Merge or discard a conversation's branch as `person`, outside the chat. With `preview`, say what it would do;
+   * otherwise do it behind the conversation's queue (never in the middle of a turn) and tell the thread.
+   */
+  async branchAction(key: string, action: 'merge' | 'discard', opts: { preview?: boolean; person: string; via: string }): Promise<string> {
     const session = await this.store.getSession(key);
     if (!session) throw new Error('no such conversation');
     const ws = this.agent(session.agent).workspace;
     if (!ws) throw new Error(`${session.agent} has no branches (worktree is off)`);
-    if (preview) {
+    if (opts.preview) {
       if (action === 'merge') {
         const p = await ws.previewMerge(key);
         if (!p.ok) throw new Error(p.reason);
@@ -1200,46 +1185,48 @@ export class Bridge implements HubBackend, WebBackend {
       if (lost === undefined) throw new Error('this conversation has no branch');
       return lost ? `This throws away ${lost}` : 'Nothing unmerged — the branch and its worktree are removed.';
     }
-    const who = this.webPerson();
-    const thread: ThreadRef = { platform: session.platform, channelId: session.channel_id, threadId: session.thread_id, isDM: key.includes(':dm:') };
-    return new Promise<string>((resolve, reject) => {
-      // Behind the conversation's queue, so never in the middle of a turn.
-      this.schedule(key, async () => {
-        try {
-          if (this.stopping) throw new Error('the bridge is shutting down');
-          if (action === 'merge') {
-            const p = await ws.previewMerge(key);
-            if (!p.ok) throw new Error(p.reason);
-          }
-          const result = action === 'merge' ? await ws.merge(key) : await ws.discard(key);
-          await this.store.deleteSession(key);
-          this.trace(key, action === 'merge' ? 'merged' : 'discarded', `${who} (web)`, { result });
-          await this.send(thread, `${result}
-_(from the dashboard, by ${who})_`).catch(() => {});
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        } finally {
-          this.branchCache.delete(key);
+    const by = `${opts.person} (${opts.via})`;
+    const thread: ThreadRef = { platform: session.platform, channelId: session.channel_id, threadId: session.thread_id, isDM: isDmKey(key) };
+    const done = Promise.withResolvers<string>();
+    this.schedule(key, async () => {
+      try {
+        if (this.stopping) throw new Error('the bridge is shutting down');
+        if (action === 'merge') {
+          const p = await ws.previewMerge(key);
+          if (!p.ok) throw new Error(p.reason);
         }
-      });
+        const result = action === 'merge' ? await ws.merge(key) : await ws.discard(key);
+        await this.store.deleteSession(key);
+        this.trace(key, action === 'merge' ? 'merged' : 'discarded', by, { result });
+        await this.notify(thread, `${result}\n_(by ${opts.person}, via ${opts.via})_`);
+        done.resolve(result);
+      } catch (err) {
+        done.reject(err);
+      } finally {
+        this.branchCache.delete(key);
+      }
     });
+    return done.promise;
   }
 
-  async webTools(): Promise<WebTool[]> {
+  /** Each tool server with its tool count, or why it can't be reached (an answer within TOOL_STATUS_MS). */
+  async toolServers(): Promise<ToolServerInfo[]> {
     return Promise.all(
-      Object.entries(this.cfg.tools).map(async ([name, cfg]): Promise<WebTool> => {
-        const base: WebTool = {
+      Object.entries(this.cfg.tools).map(async ([name, cfg]): Promise<ToolServerInfo> => {
+        const base: ToolServerInfo = {
           name,
           kind: 'url' in cfg ? 'http' : 'stdio',
           target: 'url' in cfg ? cfg.url : [cfg.command, ...cfg.args].join(' '),
           oauth: this.oauth.status(name),
         };
         if (base.oauth === 'signed-out') return base;
+        const timeout = AbortSignal.timeout(TOOL_STATUS_MS);
         try {
           const list = await Promise.race([
             this.tools.listTools(name),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('no answer in 10s')), 10e3).unref()),
+            new Promise<never>((_, reject) =>
+              timeout.addEventListener('abort', () => reject(new Error(`no answer in ${TOOL_STATUS_MS / 1000}s`)), { once: true }),
+            ),
           ]);
           return { ...base, tools: list.length };
         } catch (err) {
@@ -1249,7 +1236,61 @@ _(from the dashboard, by ${who})_`).catch(() => {});
     );
   }
 
+  /**
+   * Ask `people` (keys of cfg.people) a question in their direct messages with the bot, on every IM where they
+   * have one, with buttons where the IM has them and typed replies everywhere. Whoever answers first decides;
+   * `outcome` turns the answer into the text each message is updated with. Aborting `signal` withdraws the
+   * question (its reason, when an Error, is shown). Resolves to the number of DMs asked; 0 means nobody could be
+   * reached yet (a DM exists once the person has written to the bot).
+   */
+  async askInDms(opts: {
+    people: string[];
+    text: string;
+    choices: Choice[];
+    typedHint: string;
+    typed: (text: string) => string | undefined;
+    outcome: (r: { by: string; value: string } | undefined) => string;
+    timeoutMs: number;
+    signal: AbortSignal;
+  }): Promise<number> {
+    let asked = 0;
+    for (const id of opts.people) {
+      const person = Object.hasOwn(this.cfg.people, id) ? this.cfg.people[id] : undefined;
+      if (!person) continue;
+      for (const platform of this.ims.keys()) {
+        const userId = personIdOn(person, platform);
+        if (userId === undefined) continue;
+        const key = dmKey(platform, userId);
+        const dm = await this.store.getSession(key);
+        if (!dm) continue;
+        asked++;
+        this.choose({
+          key,
+          thread: { platform, channelId: dm.channel_id, threadId: dm.thread_id, isDM: true },
+          text: opts.text,
+          choices: opts.choices,
+          allowed: opts.people,
+          timeoutMs: opts.timeoutMs,
+          typedHint: opts.typedHint,
+          typed: opts.typed,
+          outcome: opts.outcome,
+          signal: opts.signal,
+          unlisted: true,
+        }).catch((err) => this.warn(`question not sent to ${key}: ${(err as Error).message}`));
+      }
+    }
+    return asked;
+  }
+
   // ───────────────────────── helpers ─────────────────────────
+
+  private log(line: string) {
+    this.logLine(line, 'info');
+  }
+
+  private warn(line: string) {
+    this.logLine(line, 'error');
+  }
 
   private agent(name: string): AgentAdapter {
     let a = this.agents.get(name);
@@ -1268,7 +1309,7 @@ _(from the dashboard, by ${who})_`).catch(() => {});
       return p ? { id: userId, trust: p.trust } : undefined;
     }
     for (const [id, p] of Object.entries(this.cfg.people)) {
-      if ((p as Record<string, unknown>)[platform] === userId) return { id, trust: p.trust };
+      if (personIdOn(p, platform) === userId) return { id, trust: p.trust };
     }
     return undefined;
   }
@@ -1289,13 +1330,13 @@ _(from the dashboard, by ${who})_`).catch(() => {});
     outcome: (r: { by: string; value: string } | undefined) => string;
     /** Aborting it cancels the choice: the turn that asked has ended, or an Error reason says why. */
     signal?: AbortSignal;
-    /** Leave it off the dashboard's list of choices. */
+    /** Leave it out of `pendingChoices`. */
     unlisted?: boolean;
   }): Promise<{ by: string; value: string } | undefined> {
     const im = this.ims.get(opts.thread.platform);
     const id = randomUUID().slice(0, 8);
     const allowed = new Set(opts.allowed);
-    const decided = deferred<{ by: string; value: string } | undefined>();
+    const decided = Promise.withResolvers<{ by: string; value: string } | undefined>();
     let settled = false;
     let cancelled: string | undefined;
     const settle = (r: { by: string; value: string } | undefined) => {
@@ -1358,7 +1399,7 @@ _(from the dashboard, by ${who})_`).catch(() => {});
         await this.send(opts.thread, outcome);
       }
     } catch (err) {
-      this.log(`outcome of choice in ${opts.key} not delivered: ${(err as Error).message}`);
+      this.warn(`outcome of choice in ${opts.key} not delivered: ${(err as Error).message}`);
     }
     return result;
   }
@@ -1391,7 +1432,7 @@ _(from the dashboard, by ${who})_`).catch(() => {});
     accepts: (text: string) => boolean,
     signal?: AbortSignal,
   ): { answer: Promise<{ by: string; text: string } | undefined>; cancel: (reason: string) => void } {
-    const answered = deferred<{ by: string; text: string } | undefined>();
+    const answered = Promise.withResolvers<{ by: string; text: string } | undefined>();
     let settled = false;
     const done = (v: { by: string; text: string } | undefined) => {
       if (settled) return;
@@ -1455,7 +1496,7 @@ _(from the dashboard, by ${who})_`).catch(() => {});
     try {
       await this.send(thread, text);
     } catch (err) {
-      this.log(`message to ${thread.platform}:${thread.channelId} not delivered: ${(err as Error)?.message ?? err}`);
+      this.warn(`message to ${thread.platform}:${thread.channelId} not delivered: ${(err as Error)?.message ?? err}`);
     }
   }
 
@@ -1479,12 +1520,6 @@ _(from the dashboard, by ${who})_`).catch(() => {});
   }
 }
 
-/** A promise with its resolve function (Promise.withResolvers is ES2024; the build targets ES2023). */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve: (value: T) => void = () => {};
-  const promise = new Promise<T>((r) => (resolve = r)); // the executor runs synchronously
-  return { promise, resolve };
-}
 
 /**
  * `text` (JSON) as a code block that nothing inside can close: backticks become the JSON escape `.
@@ -1494,7 +1529,7 @@ export function codeBlock(json: string, max = Infinity): string {
   let body = json.replace(/`/g, '\\u0060');
   if (body.length > max) {
     const keep = Math.max(0, Math.floor(max));
-    body = `${body.slice(0, keep)}\n… +${body.length - keep} more characters (all arguments: dashboard → Activity)`;
+    body = `${body.slice(0, keep)}\n… +${body.length - keep} more characters (all of them are in the audit trail)`;
   }
   return '```\n' + body + '\n```';
 }

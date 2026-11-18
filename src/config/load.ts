@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isMap, isSeq, LineCounter, parseDocument, type Document } from 'yaml';
-import { BridgeConfig } from './schema.ts';
+import { BridgeConfig, personIdOn } from './schema.ts';
 import { parseAddress } from '../core/address.ts';
 import { looksLikeSecret } from '../core/redact.ts';
 import { Router } from '../core/router.ts';
@@ -103,14 +103,10 @@ export function semanticCheck(cfg: BridgeConfig): ConfigIssue[] {
       if (typeof route.when.mention === 'string' && route.when.mention !== target) {
         issue([...where, 'when', 'mention'], `when.mention "${route.when.mention}" should name the route's agent "${target}"`);
       }
-      const { mention, listen } = route.when;
-      if ((listen === 'all' && mention !== undefined && mention !== false) || (listen === 'mention' && mention === false)) {
-        issue([...where, 'when'], `when.listen "${listen}" contradicts when.mention ${JSON.stringify(mention)}`);
-      }
     } else {
       if (!agentNames.has(from.name)) issue([...where, 'from'], `from "${route.from}" is not an agent`);
-      if (route.when.mention !== undefined || route.when.listen !== undefined) {
-        issue([...where, 'when'], 'mention/listen only apply to routes from IM');
+      if (route.when.mention !== undefined) {
+        issue([...where, 'when'], 'mention only applies to routes from IM');
       }
       for (const t of targets) {
         const head = t.split('.')[0]!;
@@ -158,7 +154,7 @@ export function runTests(cfg: BridgeConfig): ConfigIssue[] {
       const from = parseAddress(t.from);
       if (from.kind !== 'im') return;
       const personId = t.sender === undefined ? undefined : personFor(cfg, from.platform, t.sender);
-      const userId = personId ? ((cfg.people[personId] as Record<string, unknown>)[from.platform] as string | undefined) ?? personId : t.sender ?? 'unknown';
+      const userId = personId ? (personIdOn(cfg.people[personId]!, from.platform) ?? personId) : (t.sender ?? 'unknown');
       const isDM = from.channel === 'dm';
       const channel = from.channel.replace(/^#/, '');
       const { match, trace } = router.explainInbound(
@@ -185,7 +181,7 @@ export function runTests(cfg: BridgeConfig): ConfigIssue[] {
 /** A person id, or the person whose id on `platform` is `sender`. */
 function personFor(cfg: BridgeConfig, platform: string, sender: string): string | undefined {
   if (Object.hasOwn(cfg.people, sender)) return sender;
-  return Object.entries(cfg.people).find(([, p]) => (p as Record<string, unknown>)[platform] === sender)?.[0];
+  return Object.entries(cfg.people).find(([, p]) => personIdOn(p, platform) === sender)?.[0];
 }
 
 /** Credentials written into the file instead of referenced (`secret:name`, `env:NAME`, `${secret:name}`). */

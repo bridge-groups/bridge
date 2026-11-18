@@ -3,8 +3,9 @@ import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { checkConfig, formatIssue } from './load.ts';
-import { configChanges, type ConfigChange } from './changes.ts';
+import { configChanges, describeChanges, type ConfigChange } from './changes.ts';
 import type { BridgeConfig } from './schema.ts';
+import type { Bridge } from '../core/bridge.ts';
 
 export function configSha(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 12);
@@ -42,6 +43,10 @@ export class AppliedConfig {
   }
 }
 
+export const UNREADABLE_RECORD =
+  'the record of the config applied last is not valid for this version of bridge, so changes against it ' +
+  'cannot be reviewed — check the file, then confirm it with "bridge check --apply"';
+
 /** A config file that widens access and waits for an owner. */
 export interface PendingConfig {
   sha: string;
@@ -64,17 +69,17 @@ export type Review =
   | { status: 'apply'; config: BridgeConfig; changes: ConfigChange[] }
   | { status: 'confirm'; config: BridgeConfig; changes: ConfigChange[]; running: BridgeConfig };
 
-/** What a config file's text means against the applied one. */
-export function review(text: string, applied: string | undefined, log: (line: string) => void = () => {}): Review {
+/**
+ * What a config file's text means against the applied one. Throws when the applied record exists but is not a
+ * valid config (this version's schema rejects it): there is nothing to measure against, so only an owner
+ * confirming the whole file (`bridge check --apply`) moves on.
+ */
+export function review(text: string, applied: string | undefined): Review {
   const next = checkConfig(text);
   if (!next.config) return { status: 'invalid', issues: next.issues.map(formatIssue) };
   if (applied === undefined) return { status: 'apply', config: next.config, changes: [] };
   const running = checkConfig(applied).config;
-  if (!running) {
-    // Written by an older bridge whose schema this one no longer accepts: nothing to measure against.
-    log('the record of the applied config no longer parses; applying the file as it is');
-    return { status: 'apply', config: next.config, changes: [] };
-  }
+  if (!running) throw new Error(UNREADABLE_RECORD);
   const changes = configChanges(running, next.config);
   return changes.some((c) => c.widens)
     ? { status: 'confirm', config: next.config, changes, running }
@@ -128,7 +133,7 @@ export class ConfigGate {
   initial(): BridgeConfig {
     const text = readFileSync(this.path, 'utf8');
     const before = this.applied.read();
-    const r = review(text, before, this.log);
+    const r = review(text, before);
     if (r.status === 'invalid') throw new Error(`bridge.yaml is invalid:\n  - ${r.issues.join('\n  - ')}`);
     if (r.status === 'confirm') return r.running;
     if (text !== before) {
@@ -153,7 +158,14 @@ export class ConfigGate {
     }
     const sha = configSha(text);
     if (this.current?.pending.sha === sha || this.rejected === sha) return;
-    const r = review(text, this.applied.read(), this.log);
+    const applied = this.applied.read();
+    let r: Review;
+    try {
+      r = review(text, applied);
+    } catch (err) {
+      this.log(`config not reloaded: ${(err as Error).message}`);
+      return;
+    }
     if (r.status === 'invalid') {
       this.settle('the file changed again');
       this.log(`config not reloaded (keeping the running one):\n  - ${r.issues.join('\n  - ')}`);
@@ -161,7 +173,7 @@ export class ConfigGate {
     }
     if (r.status === 'apply') {
       this.settle('the file changed again');
-      if (r.changes.length || text !== this.applied.read()) {
+      if (r.changes.length || text !== applied) {
         this.apply(r.config);
         this.applied.write(text);
         this.record({ outcome: 'applied', sha, changes: r.changes });
@@ -185,15 +197,19 @@ export class ConfigGate {
   confirm(sha: string, by: string): ConfigChange[] {
     const text = readFileSync(this.path, 'utf8');
     if (configSha(text) !== sha) throw new Error('bridge.yaml has changed since — review it again');
-    const r = review(text, this.applied.read(), this.log);
-    if (r.status === 'invalid') throw new Error(`bridge.yaml is invalid:\n  - ${r.issues.join('\n  - ')}`);
-    this.apply(r.config);
+    const next = checkConfig(text);
+    if (!next.config) throw new Error(`bridge.yaml is invalid:\n  - ${next.issues.map(formatIssue).join('\n  - ')}`);
+    // The owner confirms the whole file, so an unreadable record only means the changes can't be listed.
+    const runningText = this.applied.read();
+    const running = runningText === undefined ? undefined : checkConfig(runningText).config;
+    const changes = running ? configChanges(running, next.config) : [];
+    this.apply(next.config);
     this.applied.write(text);
     this.rejected = undefined;
-    this.record({ outcome: 'applied', sha, by, changes: r.changes });
+    this.record({ outcome: 'applied', sha, by, changes });
     this.settle(`applied by ${by}`);
     this.log(`config change ${sha} applied by ${by}`);
-    return r.changes;
+    return changes;
   }
 
   /** An owner turned the pending change down: it stays unapplied until the file changes again. */
@@ -210,4 +226,47 @@ export class ConfigGate {
     this.current.done.abort(new Error(reason));
     this.current = undefined;
   }
+}
+
+/** How long the IM buttons for a pending config change stay open (the change itself waits until decided). */
+const ASK_OWNERS_MS = 24 * 3600_000;
+
+/**
+ * Ask every owner of the running config, in their direct messages with the bot, to apply or reject a pending
+ * change. Whichever answer comes first (here, on the dashboard or from `bridge check --apply`) settles it
+ * everywhere: the gate aborts `signal`, which withdraws the other questions.
+ */
+export async function askOwners(bridge: Bridge, running: BridgeConfig, gate: ConfigGate, pending: PendingConfig, signal: AbortSignal) {
+  const owners = Object.entries(running.people).filter(([, p]) => p.trust === 'owner').map(([id]) => id);
+  const asked = await bridge.askInDms({
+    people: owners,
+    text: [
+      `⚙️ bridge.yaml changed in a way that widens access (${pending.sha}). Apply it?`,
+      ...describeChanges(pending.changes),
+      '("+" widens access, "-" narrows it, "~" neither)',
+    ].join('\n'),
+    choices: [
+      { label: 'Apply', value: 'apply', style: 'primary' },
+      { label: 'Reject', value: 'reject', style: 'danger' },
+    ],
+    typedHint: 'Reply "apply" or "reject".',
+    typed: (t) => (/^apply$/i.test(t) ? 'apply' : /^reject$/i.test(t) ? 'reject' : undefined),
+    // Decided here: apply or reject now, so the message shows what really happened.
+    outcome: (r) => {
+      if (!r) return '⌛ No answer — the change still waits: bridge check --apply, or the dashboard.';
+      try {
+        if (r.value === 'reject') {
+          gate.reject(pending.sha, r.by);
+          return `✖ Rejected by ${r.by}; the running config stays.`;
+        }
+        gate.confirm(pending.sha, r.by);
+        return `✅ Applied by ${r.by}.`;
+      } catch (err) {
+        return `⚠️ Not applied: ${(err as Error).message}`;
+      }
+    },
+    timeoutMs: ASK_OWNERS_MS,
+    signal,
+  });
+  return asked;
 }

@@ -2,6 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+/** How many of an agent's latest turns `cheapestRecentTurn` looks at. */
+const RECENT_TURNS = 20;
+
 export interface SessionRow {
   key: string;
   agent: string;
@@ -52,14 +55,14 @@ export interface BridgeStore {
   listSessions(limit?: number): Awaitable<SessionRow[]>;
   enqueue(id: string, sessionKey: string, payload: unknown): Awaitable<void>;
   markRunning(id: string, payload: unknown): Awaitable<void>;
-  finish(id: string, status: 'done' | 'failed' | 'expired'): Awaitable<void>;
+  finish(id: string, status: 'done' | 'failed'): Awaitable<void>;
   /** Queue entries still pending or running, oldest first; older than `ttlMs` ones are marked expired instead. */
   takePending(ttlMs: number): Awaitable<QueueRow[]>;
   prune(opts: { queueBefore: number; historyBefore?: number }): Awaitable<{ queue: number; trace: number; sessions: number }>;
   /** Append to the audit trail. `detail` is JSON the bridge has already cleared of credentials. */
   trace(sessionKey: string, kind: string, actor: string, detail: string): Awaitable<void>;
-  /** The cheapest of `agent`'s last `recent` replies that reported a cost (`kind: reply`, `detail.costUsd`). */
-  cheapestRecentTurn(agent: string, recent?: number): Awaitable<number | undefined>;
+  /** The cheapest of `agent`'s last 20 replies that reported a cost (`kind: reply`, `detail.costUsd`). */
+  cheapestRecentTurn(agent: string): Awaitable<number | undefined>;
   /** Oldest first: the last `limit` entries, of one conversation or of all. */
   readTrace(opts?: { sessionKey?: string; limit?: number }): Awaitable<TraceRow[]>;
   close(): Awaitable<void>;
@@ -151,7 +154,7 @@ export class SqliteStore implements BridgeStore {
     this.db.prepare(`UPDATE queue SET status = 'running', payload = ? WHERE id = ?`).run(JSON.stringify(payload), id);
   }
 
-  finish(id: string, status: 'done' | 'failed' | 'expired') {
+  finish(id: string, status: 'done' | 'failed') {
     this.db.prepare('UPDATE queue SET status = ? WHERE id = ?').run(status, id);
   }
 
@@ -192,10 +195,10 @@ export class SqliteStore implements BridgeStore {
   }
 
   /**
-   * The cheapest of the agent's last `recent` turns that reported a cost (from the audit trail). A turn's
+   * The cheapest of the agent's last RECENT_TURNS turns that reported a cost (from the audit trail). A turn's
    * fixed overhead (system prompt, tool list, first model request) makes this a floor for what its next turn costs.
    */
-  cheapestRecentTurn(agent: string, recent = 20): number | undefined {
+  cheapestRecentTurn(agent: string): number | undefined {
     const row = this.db
       .prepare(
         `SELECT MIN(cost) AS cost FROM (
@@ -203,7 +206,7 @@ export class SqliteStore implements BridgeStore {
            WHERE kind = 'reply' AND actor = ? AND json_extract(detail, '$.costUsd') > 0
            ORDER BY id DESC LIMIT ?)`,
       )
-      .get(agent, recent) as { cost: number | null } | undefined;
+      .get(agent, RECENT_TURNS) as { cost: number | null } | undefined;
     return row?.cost ?? undefined;
   }
 

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ensureWorktree, listWorktrees, mergeBlocker, prBlocker, pruneIdle, pushPullRequest, removeWorktree, squashMerge, worktreeStatus, type WorktreeOpts,
+  branchSlug, ensureWorktree, listWorktrees, mergeBlocker, prBlocker, pruneIdle, pushPullRequest, removeWorktree, squashMerge, worktreeStatus, type WorktreeOpts,
 } from '../adapters/agent/worktree.ts';
 import { parseConfig } from '../config/load.ts';
 import { Bridge } from '../core/bridge.ts';
@@ -29,6 +29,29 @@ function repo(branch = 'main') {
   const opts = (key: string, extra: Partial<WorktreeOpts> = {}): WorktreeOpts => ({ baseCwd: root, sessionKey: key, dir, ...extra });
   return { root, g, opts, dir };
 }
+
+test('each session gets its own worktree and branch, reused across turns', async () => {
+  const { root, g } = repo();
+  mkdirSync(join(root, 'pkg'));
+  writeFileSync(join(root, 'pkg', 'b.txt'), 'x');
+  mkdirSync(join(root, 'node_modules'));
+  g(root, 'add', 'pkg');
+  g(root, 'commit', '-qm', 'pkg');
+  const dir = join(root, '..', `wts-${process.pid}-${seq++}`);
+  const at = (sessionKey: string, links?: string[]) => ensureWorktree({ baseCwd: join(root, 'pkg'), sessionKey, dir, links });
+
+  const a = await at('slack:C1:T1', ['node_modules']);
+  const b = await at('slack:C1:T2');
+  const again = await at('slack:C1:T1');
+
+  assert.ok(a.created && b.created && !again.created);
+  assert.notEqual(a.path, b.path);
+  assert.notEqual(a.branch, b.branch);
+  assert.equal(again.path, a.path);
+  assert.ok(existsSync(join(a.cwd, 'b.txt')), 'cwd maps to the same subdirectory');
+  assert.ok(existsSync(join(a.path, 'node_modules')), 'links are created');
+  assert.match(a.branch, /^bridge\/slack-c1-t1-[0-9a-f]{6}$/);
+});
 
 test('status, merge blockers, squash merge, cleanup', async () => {
   const { root, g, opts } = repo();
@@ -150,12 +173,14 @@ test('a deleted base branch is never read as "nothing unmerged"', async () => {
   assert.match((await mergeBlocker(o, st))!, /can't merge into master/);
   assert.deepEqual((await pruneIdle({ baseCwd: root, dir }, () => true)).removed, []);
 
-  // Without it (older branches, or a lost config), the work is unknown: kept, and discarding asks first.
+  // Without it (a lost or hand-edited git config), the work is unknown: kept, and discarding asks first.
   g(root, 'config', '--unset', `branch.${wt.branch}.bridgeBaseSha`);
   const unknown = (await worktreeStatus(o))!;
   assert.equal(unknown.commits, undefined);
   assert.match((await mergeBlocker(o, unknown))!, /can't tell what/);
-  assert.deepEqual(await pruneIdle({ baseCwd: root, dir }, () => true), { removed: [], errors: [] });
+  const pruned = await pruneIdle({ baseCwd: root, dir }, () => true);
+  assert.deepEqual([pruned.removed, pruned.errors], [[], []]);
+  assert.match(pruned.kept.join(), /unknown unmerged commits/);
   assert.ok(existsSync(wt.path), 'kept');
 });
 
@@ -215,6 +240,7 @@ test('thread commands: status, merge needs yes, discard confirms only when work 
     merge: async () => (calls.push('merge'), '✅ merged'),
     previewDiscard: async () => (hasWork ? '2 unmerged commits' : ''),
     discard: async () => (calls.push('discard'), '🗑 discarded'),
+    prune: async () => ({ removed: [], errors: [] }),
   };
   const runs: string[] = [];
   const cc: AgentAdapter = { name: 'cc', workspace: ws, async run(t) { runs.push(t.text); return { text: 'ok' }; } };
@@ -230,7 +256,7 @@ routes: [ { from: "slack:*", when: { sender: [alice] }, to: cc } ]
   await bridge.start();
   const answers: string[] = [];
   im.onSend((m) => {
-    if (m.text.includes('Reply `yes`')) setTimeout(() => im.receive({ userId: 'U1', text: answers.shift()!, mentioned: false }), 5);
+    if (m.text.includes('Reply `yes`')) queueMicrotask(() => im.receive({ userId: 'U1', text: answers.shift()!, mentioned: false }));
   });
   try {
     im.receive({ userId: 'U1', text: 'status' });
@@ -267,12 +293,12 @@ test('pr: pushes the branch to origin and opens a PR (fake gh), reuses an open o
   g(root, 'remote', 'add', 'origin', remote);
   g(root, 'push', '-q', 'origin', 'main');
 
-  // fake gh: `pr view` finds nothing the first time, then the PR; `pr create` records its args.
+  // fake gh: `pr view` finds nothing the first time (failing, like gh), then the PR; `pr create` records its args.
   const bin = realpathSync(mkdtempSync(join(tmpdir(), 'ab-bin-')));
   const log = join(bin, 'calls');
   write(join(bin, 'gh'), `#!/bin/sh
 echo "$@" >> "${log}"
-if [ "$1 $2" = "pr view" ]; then [ -f "${bin}/created" ] && echo https://github.com/o/r/pull/7; exit 0; fi
+if [ "$1 $2" = "pr view" ]; then [ -f "${bin}/created" ] && echo https://github.com/o/r/pull/7 && exit 0; echo 'no pull requests found for branch "x"' >&2; exit 1; fi
 if [ "$1 $2" = "pr create" ]; then touch "${bin}/created"; echo https://github.com/o/r/pull/7; exit 0; fi
 exit 1
 `);
@@ -313,12 +339,15 @@ test('pruneIdle removes idle worktrees with nothing unmerged, keeps the rest, an
   // A worktree git can't operate on: its removal fails, the others still go.
   writeFileSync(join(broken.path, '.git'), 'gitdir: /nonexistent\n');
 
-  const activeSlug = active.branch.replace('bridge/', '');
-  const { removed, errors } = await pruneIdle({ baseCwd: root, dir }, (slug) => slug !== activeSlug);
+  const activeSlug = branchSlug(active.branch);
+  const { removed, kept, errors } = await pruneIdle({ baseCwd: root, dir }, (slug) => slug !== activeSlug);
   assert.deepEqual(removed.sort(), [empty.branch, after.branch].sort());
   assert.equal(errors.length, 1);
   assert.match(errors[0]!, new RegExp(broken.branch));
   assert.ok(!existsSync(empty.path));
   assert.ok(existsSync(busy.path), 'unmerged work is kept');
+  assert.deepEqual(kept, [`${busy.branch}  (1 unmerged commits, 0 uncommitted files)`]);
+  // --force (bridge worktrees prune --force) removes unmerged work too.
+  assert.deepEqual((await pruneIdle({ baseCwd: root, dir }, (slug) => slug !== activeSlug, { force: true })).removed, [busy.branch]);
   assert.ok(existsSync(active.path), 'active conversation is kept');
 });

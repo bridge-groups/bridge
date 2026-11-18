@@ -17,7 +17,7 @@ interface TelegramState {
 
 /**
  * Telegram via Bot API long polling (no public URL). In groups, turn off privacy mode in
- * @BotFather if routes use `listen: all`; otherwise the bot only sees mentions and replies.
+ * @BotFather if routes use `mention: false`; otherwise the bot only sees mentions and replies.
  * A reply chain to one root message is one thread.
  *
  * With `stateFile`, the update offset and the reply-chain map survive restarts, so the last batch
