@@ -294,7 +294,7 @@ test('config confirmation: owners are asked in their DM, and a click applies the
   await bridge.start();
   try {
     // Alice has talked to the bot in a DM, so the bridge knows where to ask her.
-    store.upsertSession({ key: 'slack:dm:U1', agent: 'echo', agent_session_id: null, platform: 'slack', channel_id: 'D1', thread_id: 'D1', initiator: 'alice' });
+    store.upsertSession({ key: 'slack:dm:U1', agent: 'echo', platform: 'slack', channel_id: 'D1', thread_id: 'D1', initiator: 'alice' });
     const wider = BASE.replace('sender: [alice]', 'sender: [alice, bob]');
     f.edit(wider);
     gate.offer();

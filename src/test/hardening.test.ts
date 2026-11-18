@@ -426,10 +426,16 @@ test('dashboard: branch status is cached and refreshed when a turn ends', async 
 
 test('store: deleting a conversation deletes its delegation sessions; retention prunes old rows', () => {
   const store = new SqliteStore(':memory:');
-  const s = (key: string) => store.upsertSession({ key, agent: 'a', agent_session_id: 'x', platform: 'slack', channel_id: 'C', thread_id: 'T', initiator: 'alice' });
-  for (const k of ['slack:C:T', 'slack:C:T>helper', 'slack:C:T>helper>boss', 'slack:C:T2', 'slack:C:T%']) s(k);
+  const s = (key: string) => {
+    store.upsertSession({ key, agent: 'a', platform: 'slack', channel_id: 'C', thread_id: 'T', initiator: 'alice' });
+    store.updateSession(key, { agentSession: { agent: 'a', id: 'x' } });
+    store.updateSession(key, { agentSession: { agent: 'b', id: 'y' } });
+  };
+  const keys = ['slack:C:T', 'slack:C:T>helper', 'slack:C:T>helper>boss', 'slack:C:T2', 'slack:C:T%'];
+  for (const k of keys) s(k);
   store.deleteSession('slack:C:T');
   assert.deepEqual(store.listSessions().map((r) => r.key).sort(), ['slack:C:T%', 'slack:C:T2']);
+  assert.deepEqual(keys.map((k) => store.agentSession(k, 'b')), [undefined, undefined, undefined, 'y', 'y'], 'every agent\'s session id goes with it');
 
   store.enqueue('q1', 'k', {});
   store.finish('q1', 'done');
@@ -440,6 +446,7 @@ test('store: deleting a conversation deletes its delegation sessions; retention 
   assert.equal(store.sessionsActiveSince(0).length, 2);
   assert.deepEqual(store.prune({ queueBefore: later }), { queue: 1, trace: 0, sessions: 0 });
   assert.deepEqual(store.prune({ queueBefore: later, historyBefore: later }), { queue: 0, trace: 1, sessions: 2 });
+  assert.equal(store.agentSession('slack:C:T2', 'a'), undefined, 'pruned conversations take their agents\' session ids along');
   assert.deepEqual(store.takePending(60e3).map((r) => r.id), ['q2'], 'unfinished work is kept');
 });
 

@@ -214,7 +214,7 @@ routes: [ { from: "slack:*", to: hook } ]
     await bridge.idle();
     assert.match(im.transcript().join('\n'), /hook got ping/);
     const s = store.getSession('slack:C1:T1');
-    assert.equal(s?.agent_session_id, 'w1');
+    assert.equal(store.agentSession('slack:C1:T1', 'hook'), 'w1');
     assert.equal(s?.spent_usd, 0.01);
   } finally {
     await bridge.stop();

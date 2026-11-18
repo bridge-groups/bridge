@@ -51,7 +51,10 @@ await bridge.start();
   other people's bridges should not, or should run each bridge in its own sandbox. `agents` takes adapters you
   build yourself (any `AgentAdapter`).
 - **Store.** `BridgeStore` holds conversations, the inbound queue (turns resume after a restart) and the audit
-  trail. Its methods may return promises, so it can live in your database; `SqliteStore` is the default.
+  trail. Its methods may return promises, so it can live in your database; `SqliteStore` is the default. A
+  conversation records the agent holding it; each agent's own session id in it is kept apart (`agentSession`, and
+  `updateSession` with `agentSession`), so switching agents and back resumes each one's session. `deleteSession` and
+  `prune` remove those ids with their conversation.
 - **Temporary files.** Attachments and agents' scratch files go under `tempDir` (default: `bridge` in the OS temp
   folder), which the bridge keeps readable by this user only.
 - **OAuth.** Tokens for tool servers that sign in with OAuth go to `oauthStorage` (default: memory, lost on

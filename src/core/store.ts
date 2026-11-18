@@ -7,8 +7,8 @@ const RECENT_TURNS = 20;
 
 export interface SessionRow {
   key: string;
+  /** The agent holding the conversation: a message that names no agent goes to it. */
   agent: string;
-  agent_session_id: string | null;
   platform: string;
   channel_id: string;
   thread_id: string;
@@ -38,16 +38,19 @@ export interface TraceRow {
 type Awaitable<T> = T | Promise<T>;
 
 /**
- * Where a bridge keeps its state: conversations (sessions), the inbound queue that survives restarts, and the
- * audit trail. Methods may return promises, so an embedding app can keep it in its own database; the bridge
+ * Where a bridge keeps its state: conversations (sessions) with each agent's own session id in them, the inbound
+ * queue that survives restarts, and the audit trail. Methods may return promises, so an embedding app can keep it in its own database; the bridge
  * awaits every call and never runs two writes for one conversation at once. SqliteStore is the default.
  */
 export interface BridgeStore {
   getSession(key: string): Awaitable<SessionRow | undefined>;
   /** Create or update a conversation; `last_active` becomes now. */
   upsertSession(s: Omit<SessionRow, 'created_at' | 'last_active' | 'spent_usd'>): Awaitable<SessionRow>;
-  updateSession(key: string, patch: { agent_session_id?: string | null; addSpentUsd?: number }): Awaitable<void>;
-  /** Delete a conversation and the conversations it delegated to (keys starting with `<key>>`). */
+  /** The id `agent` reported for its own session in this conversation, to resume it. */
+  agentSession(key: string, agent: string): Awaitable<string | undefined>;
+  /** `last_active` becomes now; `agentSession` sets (or with `id: null` forgets) one agent's session id. */
+  updateSession(key: string, patch: { agentSession?: { agent: string; id: string | null }; addSpentUsd?: number }): Awaitable<void>;
+  /** Delete a conversation, its agents' session ids and the conversations it delegated to (keys starting with `<key>>`). */
   deleteSession(key: string): Awaitable<void>;
   /** Keys of conversations active at or after `since`. */
   sessionsActiveSince(since: number): Awaitable<string[]>;
@@ -63,8 +66,8 @@ export interface BridgeStore {
   trace(sessionKey: string, kind: string, actor: string, detail: string): Awaitable<void>;
   /** The cheapest of `agent`'s last 20 replies that reported a cost (`kind: reply`, `detail.costUsd`). */
   cheapestRecentTurn(agent: string): Awaitable<number | undefined>;
-  /** Oldest first: the last `limit` entries, of one conversation or of all. */
-  readTrace(opts?: { sessionKey?: string; limit?: number }): Awaitable<TraceRow[]>;
+  /** Oldest first: the last `limit` entries, of one conversation or of all, of the given kinds or of every kind. */
+  readTrace(opts?: { sessionKey?: string; kinds?: string[]; limit?: number }): Awaitable<TraceRow[]>;
   close(): Awaitable<void>;
 }
 
@@ -77,6 +80,8 @@ export class SqliteStore implements BridgeStore {
     this.db = new DatabaseSync(path);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
+      -- agent_session_id is no longer read: before agent_sessions it held one id per conversation, which could be
+      -- another agent's, so those ids are dropped and every conversation's agents start fresh sessions once.
       CREATE TABLE IF NOT EXISTS sessions (
         key TEXT PRIMARY KEY, agent TEXT NOT NULL, agent_session_id TEXT,
         platform TEXT NOT NULL, channel_id TEXT NOT NULL, thread_id TEXT NOT NULL,
@@ -95,6 +100,9 @@ export class SqliteStore implements BridgeStore {
       CREATE INDEX IF NOT EXISTS trace_session ON trace(session_key, id);
       CREATE INDEX IF NOT EXISTS trace_ts ON trace(ts);
       CREATE INDEX IF NOT EXISTS sessions_active ON sessions(last_active);
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        session_key TEXT NOT NULL, agent TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (session_key, agent)
+      );
     `);
   }
 
@@ -106,18 +114,30 @@ export class SqliteStore implements BridgeStore {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO sessions (key, agent, agent_session_id, platform, channel_id, thread_id, initiator, created_at, last_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO sessions (key, agent, platform, channel_id, thread_id, initiator, created_at, last_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET agent = excluded.agent, last_active = excluded.last_active`,
       )
-      .run(s.key, s.agent, s.agent_session_id, s.platform, s.channel_id, s.thread_id, s.initiator, now, now);
+      .run(s.key, s.agent, s.platform, s.channel_id, s.thread_id, s.initiator, now, now);
     return this.getSession(s.key)!;
   }
 
-  updateSession(key: string, patch: { agent_session_id?: string | null; addSpentUsd?: number }) {
+  agentSession(key: string, agent: string): string | undefined {
+    const row = this.db.prepare('SELECT id FROM agent_sessions WHERE session_key = ? AND agent = ?').get(key, agent) as
+      | { id: string }
+      | undefined;
+    return row?.id;
+  }
+
+  updateSession(key: string, patch: { agentSession?: { agent: string; id: string | null }; addSpentUsd?: number }) {
     const now = Date.now();
-    if (patch.agent_session_id !== undefined) {
-      this.db.prepare('UPDATE sessions SET agent_session_id = ? WHERE key = ?').run(patch.agent_session_id, key);
+    const { agentSession } = patch;
+    if (agentSession?.id) {
+      this.db
+        .prepare('INSERT INTO agent_sessions (session_key, agent, id) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET id = excluded.id')
+        .run(key, agentSession.agent, agentSession.id);
+    } else if (agentSession) {
+      this.db.prepare('DELETE FROM agent_sessions WHERE session_key = ? AND agent = ?').run(key, agentSession.agent);
     }
     this.db
       .prepare('UPDATE sessions SET last_active = ?, spent_usd = spent_usd + ? WHERE key = ?')
@@ -129,6 +149,9 @@ export class SqliteStore implements BridgeStore {
     const prefix = `${key}>`;
     this.db
       .prepare('DELETE FROM sessions WHERE key = ? OR substr(key, 1, ?) = ?')
+      .run(key, prefix.length, prefix);
+    this.db
+      .prepare('DELETE FROM agent_sessions WHERE session_key = ? OR substr(session_key, 1, ?) = ?')
       .run(key, prefix.length, prefix);
   }
 
@@ -185,6 +208,7 @@ export class SqliteStore implements BridgeStore {
     if (opts.historyBefore === undefined) return { queue: Number(queue), trace: 0, sessions: 0 };
     const trace = this.db.prepare('DELETE FROM trace WHERE ts < ?').run(opts.historyBefore).changes;
     const sessions = this.db.prepare('DELETE FROM sessions WHERE last_active < ?').run(opts.historyBefore).changes;
+    this.db.prepare('DELETE FROM agent_sessions WHERE session_key NOT IN (SELECT key FROM sessions)').run();
     return { queue: Number(queue), trace: Number(trace), sessions: Number(sessions) };
   }
 
@@ -210,11 +234,20 @@ export class SqliteStore implements BridgeStore {
     return row?.cost ?? undefined;
   }
 
-  readTrace(opts: { sessionKey?: string; limit?: number } = {}): TraceRow[] {
-    const limit = opts.limit ?? 100;
-    const rows = opts.sessionKey
-      ? this.db.prepare('SELECT * FROM trace WHERE session_key = ? ORDER BY id DESC LIMIT ?').all(opts.sessionKey, limit)
-      : this.db.prepare('SELECT * FROM trace ORDER BY id DESC LIMIT ?').all(limit);
+  readTrace(opts: { sessionKey?: string; kinds?: string[]; limit?: number } = {}): TraceRow[] {
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (opts.sessionKey) {
+      where.push('session_key = ?');
+      args.push(opts.sessionKey);
+    }
+    if (opts.kinds) {
+      where.push(`kind IN (${opts.kinds.map(() => '?').join(', ')})`);
+      args.push(...opts.kinds);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM trace ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`)
+      .all(...args, opts.limit ?? 100);
     return (rows as unknown as TraceRow[]).reverse();
   }
 

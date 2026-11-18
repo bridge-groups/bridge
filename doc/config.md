@@ -64,9 +64,11 @@ A message reaches an agent only through a route (deny by default).
 - A message that starts with an agent's name (`codex fix the login`, `@bot codex …`) is for that agent only.
 - A message that names no agent stays with the agent already holding the conversation (the thread, or the DM until
   `dm_idle_reset`): that agent's routes are tried first, and each must still match. Otherwise routes are tried top
-  to bottom and the first that matches wins. Switching agents starts the new one on a fresh session.
+  to bottom and the first that matches wins. Each agent keeps its own session in the conversation: switching back
+  resumes it, with a short note of the other agents' messages and replies since its last reply (the newest 10,
+  500 characters each, from the audit trail).
 - A reply in a thread the agent already holds needs no mention.
-- `reset` / `/new` starts a fresh agent session for the thread.
+- `reset` / `/new` starts fresh sessions for the thread, for every agent in it.
 - An agent route (`from: <agent>`) lists what that agent may reach: other agents, and tools as `server.tool`
   globs.
 
