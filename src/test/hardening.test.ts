@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, utimesSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync, existsSync, utimesSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig } from '../config/load.ts';
@@ -9,6 +9,7 @@ import { localAgents } from '../adapters/agent/local.ts';
 import { newEnvelope } from '../core/envelope.ts';
 import { SqliteStore } from '../core/store.ts';
 import { Redactor } from '../core/redact.ts';
+import { privateDir } from '../core/temp.ts';
 import type { AgentAdapter, AgentTurn, Workspace } from '../adapters/agent/types.ts';
 import type { ImAdapter, OutboundMessage } from '../adapters/im/types.ts';
 import { FakeIm, scripted, text, until } from './helpers.ts';
@@ -31,7 +32,7 @@ policies:
 ${extra}`;
 
 
-async function setup(opts: { agents?: AgentAdapter[]; im?: FakeIm; store?: SqliteStore; extra?: string; filesDir?: string } = {}) {
+async function setup(opts: { agents?: AgentAdapter[]; im?: FakeIm; store?: SqliteStore; extra?: string; tempDir?: string } = {}) {
   const im = opts.im ?? new FakeIm();
   const store = opts.store ?? new SqliteStore(':memory:');
   const logs: string[] = [];
@@ -41,7 +42,7 @@ async function setup(opts: { agents?: AgentAdapter[]; im?: FakeIm; store?: Sqlit
     store,
     ims: [im],
     agents: new Map((opts.agents ?? []).map((a) => [a.name, a])),
-    filesDir: opts.filesDir,
+    tempDir: opts.tempDir,
     log: (l) => logs.push(l),
   });
   await bridge.start();
@@ -204,14 +205,16 @@ test('an approval that outlives its turn is cancelled and the tool never runs', 
 });
 
 test('housekeeping survives stray files in the files folder and still expires old attachments', async () => {
-  const filesDir = mkdtempSync(join(tmpdir(), 'ab-files-'));
+  const tempDir = mkdtempSync(join(tmpdir(), 'ab-temp-'));
+  const filesDir = join(tempDir, 'files');
+  mkdirSync(filesDir);
   writeFileSync(join(filesDir, '.DS_Store'), 'x');
   mkdirSync(join(filesDir, 'conv'));
   const old = join(filesDir, 'conv', 'old.png');
   writeFileSync(old, 'x');
   const t = Date.now() / 1000 - 8 * 86400;
   utimesSync(old, t, t);
-  const { bridge } = await setup({ filesDir });
+  const { bridge } = await setup({ tempDir });
   try {
     await bridge.cleanUp();
     assert.ok(!existsSync(old));
@@ -326,10 +329,10 @@ test('a message named like an Object.prototype member is a prompt, not a command
 });
 
 test('a message with a slow attachment keeps its place before later messages', async () => {
-  const filesDir = mkdtempSync(join(tmpdir(), 'ab-files-'));
+  const tempDir = mkdtempSync(join(tmpdir(), 'ab-temp-'));
   const seen: string[] = [];
   const boss: AgentAdapter = { name: 'boss', async run(t) { seen.push(t.text); return { text: 'ok' }; } };
-  const { im, bridge } = await setup({ agents: [boss], filesDir });
+  const { im, bridge } = await setup({ agents: [boss], tempDir });
   let release = () => {};
   const downloaded = new Promise<void>((r) => (release = r));
   try {
@@ -463,4 +466,18 @@ test('trace redaction: token formats and registered secret values', () => {
   assert.equal(redact('sent plain-looking-value-42 and short'), 'sent [redacted] and short');
   registerSecret('with"quote\\slash');
   assert.equal(redact(JSON.stringify({ v: 'with"quote\\slash' })), '{"v":"[redacted]"}');
+});
+
+test('the temp folder is private: created 0700, a loose one is tightened, a symlink in its place is refused', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ab-private-'));
+  const fresh = privateDir(join(base, 'a', 'bridge'));
+  assert.equal(statSync(fresh).mode & 0o777, 0o700);
+  const loose = join(base, 'loose');
+  mkdirSync(loose, { mode: 0o777 });
+  chmodSync(loose, 0o777);
+  privateDir(loose);
+  assert.equal(statSync(loose).mode & 0o777, 0o700);
+  const target = mkdtempSync(join(tmpdir(), 'ab-elsewhere-'));
+  symlinkSync(target, join(base, 'planted'));
+  assert.throws(() => privateDir(join(base, 'planted')), /not a folder/);
 });

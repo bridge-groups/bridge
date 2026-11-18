@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { checkConfig, formatIssue } from './load.ts';
 import { configChanges, describeChanges, type ConfigChange } from './changes.ts';
 import type { BridgeConfig } from './schema.ts';
 import type { Bridge } from '../core/bridge.ts';
+import { DATA_DIR } from '../paths.ts';
 
 export function configSha(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 12);
@@ -21,7 +21,7 @@ export class AppliedConfig {
     this.file = file;
   }
 
-  static for(configPath: string, dir = join(homedir(), '.bridge', 'applied')): AppliedConfig {
+  static for(configPath: string, dir = join(DATA_DIR, 'applied')): AppliedConfig {
     const id = createHash('sha256').update(realpathSync(configPath)).digest('hex').slice(0, 16);
     return new AppliedConfig(join(dir, `${id}.yaml`));
   }

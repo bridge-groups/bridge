@@ -4,7 +4,11 @@ import type { AgentAdapter } from './types.ts';
 import { WebhookAgent } from './webhook.ts';
 
 /** Builds the adapter for one agent of the config; the bridge calls it when the agent is first needed. */
-export type AgentFactory = (name: string, cfg: AgentConfig, ctx: { secrets: SecretResolver }) => AgentAdapter;
+export type AgentFactory = (
+  name: string,
+  cfg: AgentConfig,
+  ctx: { secrets: SecretResolver; /** The bridge's private temp folder, for agents' scratch files. */ tempDir: string },
+) => AgentAdapter;
 
 /**
  * Agents that run elsewhere and are reached over the network. Agents that run code on this machine

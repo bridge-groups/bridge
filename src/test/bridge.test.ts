@@ -308,13 +308,13 @@ test('attachments are downloaded per conversation and handed to the agent; overs
   const { mkdtempSync, readFileSync, utimesSync, existsSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const filesDir = mkdtempSync(join(tmpdir(), 'ab-files-'));
+  const tempDir = mkdtempSync(join(tmpdir(), 'ab-temp-'));
   const seen: AgentTurn[] = [];
   const echo: AgentAdapter = { name: 'echo', async run(t) { seen.push(t); return { text: 'got it' }; } };
   const im = new FakeIm();
   const bridge = new Bridge({
     agentFactory: localAgents,
-    cfg: parseConfig(yaml()), store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['echo', echo]]), filesDir, log: () => {},
+    cfg: parseConfig(yaml()), store: new SqliteStore(':memory:'), ims: [im], agents: new Map([['echo', echo]]), tempDir, log: () => {},
   });
   await bridge.start();
   try {

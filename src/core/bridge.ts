@@ -14,10 +14,10 @@ import { PolicyEngine } from './policy.ts';
 import { Router, type InboundFile, type InboundMessage } from './router.ts';
 import { existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import type { BridgeStore } from './store.ts';
 import { Redactor } from './redact.ts';
+import { DEFAULT_TEMP_DIR, privateDir } from './temp.ts';
 import { envSecrets, type SecretResolver } from './secrets.ts';
 
 interface ThreadRef {
@@ -93,8 +93,11 @@ export interface BridgeOptions {
    * `sessions`, `pendingChoices` and the other methods for the app. Return false to answer 404.
    */
   extraRoutes?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
-  /** Where attachments are downloaded (default: a temp dir). */
-  filesDir?: string;
+  /**
+   * Where the bridge keeps temporary files, readable by this user only: attachments under `files/` (deleted after
+   * `files_ttl`) and agents' scratch files (default: `bridge` in the OS temp folder).
+   */
+  tempDir?: string;
   /** Where log lines go (default: the console); `error` marks failures someone should look at. */
   log?: (line: string, level: 'info' | 'error') => void;
 }
@@ -232,6 +235,8 @@ export class Bridge implements HubBackend {
   private readonly branchCache = new Map<string, { at: number; branch?: string; canMerge: boolean }>();
   readonly oauth: OAuthFlows;
   private startedAt = 0;
+  private readonly tempDir: string;
+  /** Attachments, by conversation. */
   private readonly filesDir: string;
   private housekeeping?: NodeJS.Timeout;
   private firstCleanUp?: NodeJS.Timeout;
@@ -269,7 +274,8 @@ export class Bridge implements HubBackend {
     });
     this.hub = new McpHub(this, () => this.baseUrl());
     this.logLine = opts.log ?? ((l, level) => (level === 'error' ? console.error(l) : console.log(l)));
-    this.filesDir = opts.filesDir ?? join(tmpdir(), 'bridge-files');
+    this.tempDir = opts.tempDir ?? DEFAULT_TEMP_DIR;
+    this.filesDir = join(this.tempDir, 'files');
   }
 
   /**
@@ -277,6 +283,7 @@ export class Bridge implements HubBackend {
    * cfg.server; with it, the app serves `handle` and nothing listens here. Returns where agents reach the bridge.
    */
   async start(): Promise<{ mcpUrl: string }> {
+    privateDir(this.tempDir);
     if (!this.mcpBaseUrl) await this.listen();
     const mcpUrl = this.baseUrl();
     // Work left over from the last run takes its place in the queues before any new message can;
@@ -1297,7 +1304,7 @@ export class Bridge implements HubBackend {
     if (!a) {
       const cfg = Object.hasOwn(this.cfg.agents, name) ? this.cfg.agents[name] : undefined;
       if (!cfg) throw new Error(`unknown agent "${name}"`);
-      a = this.agentFactory(name, cfg, { secrets: this.secrets });
+      a = this.agentFactory(name, cfg, { secrets: this.secrets, tempDir: this.tempDir });
       this.agents.set(name, a);
     }
     return a;

@@ -52,6 +52,8 @@ await bridge.start();
   build yourself (any `AgentAdapter`).
 - **Store.** `BridgeStore` holds conversations, the inbound queue (turns resume after a restart) and the audit
   trail. Its methods may return promises, so it can live in your database; `SqliteStore` is the default.
+- **Temporary files.** Attachments and agents' scratch files go under `tempDir` (default: `bridge` in the OS temp
+  folder), which the bridge keeps readable by this user only.
 - **OAuth.** Tokens for tool servers that sign in with OAuth go to `oauthStorage` (default: memory, lost on
   restart).
 - **Config changes.** `bridge.reload(cfg)` applies a new config without dropping IM connections. To hold back

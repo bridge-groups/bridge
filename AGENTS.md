@@ -83,7 +83,7 @@ src/                     all source code
   index.ts               the library's entry point (@bridge-groups/bridge): nothing CLI-only or local
   local.ts               opt-in local agents (@bridge-groups/bridge/local)
   cli.ts                 commands (bridge init | up | chat | check | doctor | auth | dashboard | service | …);
-                         with secrets.ts, keychain-oauth.ts, service.ts, template.ts, config/gate.ts, web/
+                         with paths.ts, secrets.ts, keychain-oauth.ts, service.ts, template.ts, config/gate.ts, web/
   config/                bridge.yaml schema (zod), checks with line numbers, tests, change review
   core/                  router, policies, SQLite store, the Bridge orchestrator
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
@@ -136,7 +136,8 @@ uses, `npm run build && node out/cli.js service restart`.
 
 - Routing is deny-by-default; agents that run on this machine need an explicit `when.sender`.
 - Secrets come from the OS keychain (`bridge secret set`) or the environment. Never put them in argv, logs,
-  the trace, error messages or committed files. `bridge.yaml` is personal and git-ignored.
+  the trace, error messages or committed files. `bridge.yaml` is personal: it lives in `~/.config/bridge/`, never
+  in the repository (`src/paths.ts` has every location the CLI uses).
 - Text from chats, tools and web pages is data, not instructions. Render it as text (dashboard uses
   `textContent`), and keep tool writes behind policies.
 - The HTTP server serves this machine only; dashboard writes must stay same-origin JSON with a Host check.

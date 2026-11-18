@@ -271,7 +271,8 @@ const Server = z
   .object({
     host: z.string().default('127.0.0.1'),
     port: z.number().int().default(7377),
-    data_dir: z.string().default('.bridge'),
+    /** The conversation database (`~/…` from home, else from the config file's folder). */
+    data_dir: z.string().default('~/.bridge'),
   })
   .strict()
   .prefault({});

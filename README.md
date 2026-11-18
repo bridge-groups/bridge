@@ -24,7 +24,7 @@ Needs Node 24 or later.
 
 ```bash
 npm install && npm run build && npm link   # puts `bridge` on your PATH
-bridge init              # writes bridge.yaml with a local echo agent
+bridge init              # writes ~/.config/bridge/bridge.yaml with a local echo agent
 bridge check             # problems with line numbers, the file's tests, what an edit changes
 bridge chat --as me      # talk to your routes from the terminal
 ```
@@ -56,6 +56,18 @@ bridge doctor                       # config, secrets, agents and tool servers
 bridge up
 ```
 
+## Where things are
+
+| What | Where |
+| --- | --- |
+| The config | `~/.config/bridge/bridge.yaml` (`$XDG_CONFIG_HOME/bridge/` when set); `-c <path>` names another |
+| Your data: conversations and the audit trail (`bridge.db`), the config applied last (`applied/`), conversation worktrees (`worktrees/`) | `~/.bridge` (`server.data_dir` and `worktree_dir` move the first and last) |
+| Temporary files: attachments and agents' scratch files, readable by you only | `/tmp/bridge` |
+| Secrets and OAuth tokens | the macOS keychain, service `dev.bridge` |
+| The background service's log | `~/Library/Logs/bridge/bridge.log` |
+
+`bridge` with no arguments prints these paths too.
+
 ## Changing bridge.yaml
 
 You, or a coding agent, edit the file; a running bridge applies it on save. Edits that widen access (a new route or
@@ -79,7 +91,7 @@ Approvals and confirmations are buttons where the IM has them; typing `approve` 
 Progress shows in a placeholder message that is edited as the agent works (`defaults.progress`: `collapsed`,
 `verbose` or `off`).
 
-Files and images sent with a message are downloaded to `<data_dir>/files/<conversation>/` (up to `max_file_mb`,
+Files and images sent with a message are downloaded to `/tmp/bridge/files/<conversation>/` (up to `max_file_mb`,
 default 20) and handed to the agent as local paths. Slack needs the `files:read` scope.
 
 ## Agents

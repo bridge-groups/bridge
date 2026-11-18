@@ -22,7 +22,7 @@
           "maximum": 9007199254740991
         },
         "data_dir": {
-          "default": ".bridge",
+          "default": "~/.bridge",
           "type": "string"
         }
       },

@@ -1,6 +1,7 @@
 # Editing bridge.yaml
 
-`bridge.yaml` is the whole configuration: there is no other state to keep in sync. You, or a coding agent, edit
+`bridge.yaml` (at `~/.config/bridge/bridge.yaml` unless `-c` names another) is the whole configuration: there is
+no other state to keep in sync. You, or a coding agent, edit
 the file; `bridge check` says whether it is valid and what the edit changes; a running bridge applies it on save.
 Edits that widen access wait until an owner confirms them.
 
@@ -120,7 +121,7 @@ mentioned); `text` defaults to `hello`. To see why a message routes the way it d
 | `routes` | `{ from, when, to }` | `from`: an IM address or an agent. `when`: `mention`, `sender`. `to`: one agent (from IM), or agents and `server.tool` globs (from an agent) |
 | `policies` | `{ match: { tool, agent, writes }, approve_by, timeout, max_hops, budget_usd }` | Every key of `match` must hold; all applying policies count and the strictest wins |
 | `defaults` | `dm_idle_reset`, `offline_queue_ttl`, `progress`, `max_hops`, `max_file_mb`, `files_ttl`, `worktree_prune_after`, `retention` | Housekeeping and limits |
-| `server` | `host`, `port`, `data_dir` | The dashboard and MCP hub listen on `host:port` |
+| `server` | `host`, `port`, `data_dir` | The dashboard and MCP hub listen on `host:port`; the database is in `data_dir` (default `~/.bridge`; a relative path is from the config file's folder) |
 | `tests` | Assertions, see above | |
 
 The schema has every key with its default and a description.

@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentConfig } from '../../config/schema.ts';
 import type { SecretResolver } from '../../core/secrets.ts';
+import { DEFAULT_TEMP_DIR, privateDir } from '../../core/temp.ts';
 import type { AgentReply, AgentTurn } from './types.ts';
 import { CliAgent, shortStep, withFiles, type CliInvocation, type CliOutput } from './cli-agent.ts';
 
@@ -12,14 +12,17 @@ type ClaudeCodeConfig = Extract<AgentConfig, { type: 'claude-code' }>;
 export class ClaudeCodeAgent extends CliAgent {
   protected readonly label = 'claude';
   private readonly cfg: ClaudeCodeConfig;
+  /** Each turn's MCP settings file goes in a folder of its own here. */
+  private readonly tempDir: string;
 
-  constructor(name: string, cfg: ClaudeCodeConfig, secrets: SecretResolver) {
+  constructor(name: string, cfg: ClaudeCodeConfig, secrets: SecretResolver, tempDir = DEFAULT_TEMP_DIR) {
     super(name, cfg, secrets);
     this.cfg = cfg;
+    this.tempDir = tempDir;
   }
 
   protected invocation(_cwd: string, turn: AgentTurn, instructions: string, resume: string | undefined): CliInvocation {
-    const dir = mkdtempSync(join(tmpdir(), 'bridge-'));
+    const dir = mkdtempSync(join(privateDir(this.tempDir), 'claude-'));
     const mcpFile = join(dir, 'mcp.json');
     writeFileSync(mcpFile, JSON.stringify({ mcpServers: { bridge: { type: 'http', url: turn.mcp.url } } }), {
       mode: 0o600,

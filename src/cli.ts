@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve, join, dirname, basename } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -32,6 +32,7 @@ import { TEMPLATE } from './template.ts';
 import { slackManifest } from './slack-manifest.ts';
 import { branchSlug, expandHome, listWorktrees, pruneIdle, statusAt } from './adapters/agent/worktree.ts';
 import { localBaseUrl, parseDuration, sessionSlug } from './core/address.ts';
+import { CONFIG_FILE, DATA_DIR, TEMP_DIR } from './paths.ts';
 import { installService, restartService, serviceStatus, uninstallService } from './service.ts';
 
 const HELP = `bridge — connect agents to IM, to each other, and to tools
@@ -63,14 +64,16 @@ Usage: bridge <command> [options]
   trace [--session <key>] [-n 50]
                            show the audit trail
 
-Options: -c, --config <path>   (default ./bridge.yaml)
+Options: -c, --config <path>   (default ${CONFIG_FILE})
+
+Files: config ${CONFIG_FILE}; data ${DATA_DIR}; temporary files ${TEMP_DIR}
 `;
 
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
-      config: { type: 'string', short: 'c', default: 'bridge.yaml' },
+      config: { type: 'string', short: 'c', default: CONFIG_FILE },
       as: { type: 'string' },
       from: { type: 'string' },
       sender: { type: 'string' },
@@ -95,12 +98,13 @@ async function main() {
   switch (cmd) {
     case 'init': {
       if (existsSync(configPath) && !values.force) fail(`${configPath} exists (use --force to overwrite)`);
+      mkdirSync(dirname(configPath), { recursive: true });
       writeFileSync(configPath, TEMPLATE);
       console.log(`wrote ${configPath}\nnext: edit it, then run "bridge doctor" and "bridge chat --as me"`);
       return;
     }
     case 'up':
-      return run(configPath, (cfg, secrets) => buildIms(cfg, resolve(configPath, '..', cfg.server.data_dir), secrets));
+      return run(configPath, (cfg, secrets) => buildIms(cfg, dataDir(cfg, configPath), secrets));
     case 'chat': {
       if (!values.as) fail('chat needs --as <person id from people:>');
       return run(configPath, () => [new LocalConsoleAdapter({ as: values.as! })], { quiet: true });
@@ -290,7 +294,6 @@ async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretR
   const cfg = running;
   const store = openStore(cfg, configPath);
   gate.onAudit((event) => store.trace('config', 'config', event.by ?? 'file', JSON.stringify(event)));
-  const filesDir = join(resolve(configPath, '..', cfg.server.data_dir), 'files');
   // Credentials come from the keychain; the IM tokens resolved here are kept out of the audit trail too.
   const redactor = new Redactor();
   const secrets: SecretResolver = (ref) => {
@@ -314,7 +317,7 @@ async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretR
     agentFactory: localAgents,
     oauthStorage: keychainStorage(),
     extraRoutes: web,
-    filesDir,
+    tempDir: TEMP_DIR,
     log,
   });
   const { mcpUrl } = await bridge.start();
@@ -475,9 +478,13 @@ function load(path: string, exitOnError = true): BridgeConfig {
   }
 }
 
+/** `server.data_dir`: `~/…` from home, a relative path from the config file's folder. */
+function dataDir(cfg: BridgeConfig, configPath: string): string {
+  return resolve(dirname(configPath), expandHome(cfg.server.data_dir));
+}
+
 function openStore(cfg: BridgeConfig, configPath: string): SqliteStore {
-  const dir = resolve(configPath, '..', cfg.server.data_dir);
-  return new SqliteStore(join(dir, 'bridge.db'));
+  return new SqliteStore(join(dataDir(cfg, configPath), 'bridge.db'));
 }
 
 function readSecretValue(prompt: string): Promise<string> {

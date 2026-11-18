@@ -34,7 +34,7 @@ test('library: VERSION is the package version', () => {
 test('library: the lib entry point never loads the CLI, the keychain, the dashboard or local agents', () => {
   const lib = runtimeGraph('index.ts');
   const cliOnly = [
-    'cli.ts', 'secrets.ts', 'keychain-oauth.ts', 'service.ts', 'template.ts', 'config/gate.ts',
+    'cli.ts', 'paths.ts', 'secrets.ts', 'keychain-oauth.ts', 'service.ts', 'template.ts', 'config/gate.ts',
     'web/api.ts', 'web/page.ts',
     'adapters/agent/local.ts', 'adapters/agent/cli-agent.ts', 'adapters/agent/claude-code.ts', 'adapters/agent/codex.ts',
     'adapters/agent/stdio.ts', 'adapters/agent/worktree.ts',
