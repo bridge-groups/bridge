@@ -88,6 +88,18 @@ echo '{"type":"result","subtype":"error_during_execution","is_error":true,"sessi
   assert.equal((await agent.run(turn('hi'))).text, '⚠️ error_during_execution: No conversation found with session ID: X');
 });
 
+test('claude-code: a run stopped at --max-budget-usd is answered with the budget notice', async () => {
+  // The result Claude Code 2.1.308 emits when the run reaches --max-budget-usd (its result schema and emitter).
+  const fake = script(tmp('ab-cc-'), 'claude', `#!/bin/sh
+cat > /dev/null
+echo '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"terminal_reason":"budget_exhausted","session_id":"S1","total_cost_usd":0.52,"num_turns":3,"errors":["Reached maximum budget ($0.50)"]}'
+`);
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());
+  const reply = await agent.run(turn('hi', { budgetUsd: 0.5 }));
+  assert.equal(reply.text, `💸 Stopped: this turn reached the conversation's remaining budget ($0.50). Send "reset" to start a new conversation with a fresh budget.`);
+  assert.equal(reply.costUsd, 0.52);
+});
+
 test('claude-code: a process that exits without reading its prompt fails the turn instead of crashing (EPIPE)', async () => {
   const fake = script(tmp('ab-cc-'), 'claude', '#!/bin/sh\necho "bad flag" >&2\nexit 3\n');
   const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: tmpdir() }), envSecrets());

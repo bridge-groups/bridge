@@ -59,7 +59,8 @@ export class ClaudeCodeAgent extends CliAgent {
             if (block.type === 'tool_use') turn.onProgress?.(describeToolUse(block.name, block.input));
           }
         } else if (ev.type === 'result') {
-          const overBudget = /budget/i.test(String(ev.subtype ?? ''));
+          // The subtype Claude Code reports when it stops at --max-budget-usd.
+          const overBudget = ev.subtype === 'error_max_budget_usd';
           result = {
             text: overBudget
               ? `💸 Stopped: this turn reached the conversation's remaining budget ($${turn.budgetUsd?.toFixed(2)}). Send "reset" to start a new conversation with a fresh budget.`
