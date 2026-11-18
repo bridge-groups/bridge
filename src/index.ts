@@ -3,7 +3,7 @@
  * to resolve secrets, a store and IM connections, and mounts `bridge.handle` on its own HTTP server. Nothing
  * here reads config files, the OS keychain or the dashboard; that is the CLI's (`bridge`).
  *
- * Agents that run code on this machine (claude-code, stdio) are opt-in: `@bridge-groups/bridge/local`.
+ * Agents that run code on this machine (claude-code, codex, stdio) are opt-in: `@bridge-groups/bridge/local`.
  */
 
 // The bridge

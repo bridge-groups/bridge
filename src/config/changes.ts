@@ -7,6 +7,8 @@ export interface ConfigChange {
   /** The entry: a person, agent, tool or IM name, or a route / policy as text. */
   key: string;
   kind: 'added' | 'removed' | 'changed' | 'reordered';
+  /** For a changed agent or tool server: the settings that differ. */
+  fields?: string[];
   /** Lets someone or something do what it could not before; such a change waits for an owner to confirm it. */
   widens: boolean;
 }
@@ -18,13 +20,19 @@ export interface ConfigChange {
 export function configChanges(prev: BridgeConfig, next: BridgeConfig): ConfigChange[] {
   const out: ConfigChange[] = [];
   // Named entries: anything new or different can reach further (a person's id, an agent's command, a token).
+  // Agents and tool servers are compared setting by setting, so a new description or model needs no one.
   for (const section of ['people', 'agents', 'tools', 'im'] as const) {
     const a = prev[section] as Record<string, unknown>;
     const b = next[section] as Record<string, unknown>;
     for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
       if (!Object.hasOwn(b, key)) out.push({ section, key, kind: 'removed', widens: false });
       else if (!Object.hasOwn(a, key)) out.push({ section, key, kind: 'added', widens: true });
-      else if (!isDeepStrictEqual(a[key], b[key])) out.push({ section, key, kind: 'changed', widens: true });
+      else if (isDeepStrictEqual(a[key], b[key])) continue;
+      else if (section === 'agents' || section === 'tools') {
+        const fields = changedFields(a[key] as Settings, b[key] as Settings);
+        const widens = fields.some((f) => fieldWidens(f, (a[key] as Settings)[f], (b[key] as Settings)[f]));
+        out.push({ section, key, kind: 'changed', widens, fields });
+      } else out.push({ section, key, kind: 'changed', widens: true });
     }
   }
 
@@ -55,6 +63,36 @@ export function configChanges(prev: BridgeConfig, next: BridgeConfig): ConfigCha
   }
   if (!isDeepStrictEqual(prev.tests, next.tests)) out.push({ section: 'tests', key: 'tests', kind: 'changed', widens: false });
   return out;
+}
+
+type Settings = Record<string, unknown>;
+
+function changedFields(a: Settings, b: Settings): string[] {
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((f) => !isDeepStrictEqual(a[f], b[f])).sort();
+}
+
+/** Settings that describe or pace an agent or tool server without changing what it can reach or do. */
+const INERT = new Set(['description', 'timeout', 'model']);
+
+/** Settings with a known order from least to most access; moving down that order narrows. */
+const LADDERS: Record<string, readonly unknown[]> = {
+  permission_mode: ['plan', 'default', 'acceptEdits', 'bypassPermissions'],
+  sandbox: ['read-only', 'workspace-write', 'danger-full-access'],
+};
+
+/**
+ * Whether changing one setting of an agent or tool server can widen access. Anything not known to be harmless
+ * (a command, URL, header, directory, environment, type) counts as widening.
+ */
+function fieldWidens(field: string, a: unknown, b: unknown): boolean {
+  if (INERT.has(field)) return false;
+  const ladder = LADDERS[field];
+  if (ladder && ladder.includes(a) && ladder.includes(b)) return ladder.indexOf(b) > ladder.indexOf(a);
+  // Fewer pre-approved tools narrows; any new one widens.
+  if (field === 'allowed_tools' && Array.isArray(a) && Array.isArray(b)) return b.some((t) => !a.includes(t));
+  // Turning worktrees on keeps the agent off your checkout; turning them off puts it there.
+  if (field === 'worktree') return b !== true;
+  return true;
 }
 
 /** Entries only in `b` (added) or only in `a` (removed), counting duplicates; `reordered` when only the order differs. */
@@ -92,5 +130,7 @@ function policyText(p: Policy): string {
 
 /** One line per change: "+" widens, "-" narrows, "~" neither. */
 export function describeChanges(changes: ConfigChange[]): string[] {
-  return changes.map((c) => `${c.widens ? '+' : c.kind === 'removed' ? '-' : '~'} ${c.section} ${c.kind}: ${c.key}`);
+  return changes.map(
+    (c) => `${c.widens ? '+' : c.kind === 'removed' ? '-' : '~'} ${c.section} ${c.kind}: ${c.key}${c.fields?.length ? ` (${c.fields.join(', ')})` : ''}`,
+  );
 }

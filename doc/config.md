@@ -35,6 +35,7 @@ What widens access:
 | --- | --- |
 | A route is added or changed, or routes are reordered | Routes match top to bottom, so a message may reach another agent |
 | A person, agent, tool server or IM connection is added or changed | A new id, command, URL or token reaches further |
+| For an agent or tool server, only a setting that can reach further | `description`, `timeout` and `model` never do; `permission_mode` and `sandbox` only toward more access; `allowed_tools` only with a new tool; `worktree` only when turned off. Anything else (`command`, `cwd`, `url`, `headers`, `env`, …) does |
 | A policy is removed or changed, or a new policy names approvers | An approval or limit is lifted, or more people may approve |
 | `defaults.max_hops` goes up, or `server.host` changes | Delegation goes further, or the dashboard listens beyond this machine |
 
@@ -44,12 +45,13 @@ other `defaults`.
 The confirmation guards against edits nobody meant to make, such as a prompt-injected agent changing routes. It is
 not a sandbox: an agent that can run arbitrary commands as you can do anything you can, including confirming its
 own change. Keep agents that run through the bridge on a permission mode and tool list that need your approval for
-shell commands (Claude Code's `permission_mode` and `allowed_tools`).
+shell commands (Claude Code's `permission_mode` and `allowed_tools`), or in a sandbox that keeps their writes off your
+checkout (Codex's `sandbox`: `read-only`, or `workspace-write` with `worktree: true`).
 
 ## Rules a check enforces
 
 - Routing is deny-by-default and first-match. A route from IM to an agent that runs on this machine
-  (`claude-code`, `stdio`) needs `when.sender`: a list of people, or `anyone` to opt out on purpose.
+  (`claude-code`, `codex`, `stdio`) needs `when.sender`: a list of people, or `anyone` to opt out on purpose.
 - Credentials never go in the file. Store them with `bridge secret set <name>` and write `secret:<name>`, or
   `env:NAME`; in a header write `Bearer ${secret:name}`. A value that looks like a token is an error.
 - Names of agents and tool servers use letters, digits, `-` and `_`; an agent and a tool server can't share a name.
@@ -81,7 +83,7 @@ mentioned); `text` defaults to `hello`. To see why a message routes the way it d
 | --- | --- | --- |
 | `people` | `<id>: { trust, slack, feishu, telegram, discord }` | `trust`: `owner`, `trusted`, `member` (default), `agent`, `external`. Platform ids: Slack member id, Feishu / Lark open_id |
 | `im` | `slack`, `feishu`, `telegram` connections | Credentials as `secret:` / `env:` references; `feishu.domain`: `feishu` or `lark`. Changing them needs a restart |
-| `agents` | `<name>: { type: claude-code \| webhook \| stdio, … }` | claude-code: `cwd`, `permission_mode`, `allowed_tools`, `model`, `worktree`, `worktree_links`, `git_token`. webhook: `url`, `headers`, `timeout`. stdio: `command`, `args`, `cwd`, `env`, `timeout` |
+| `agents` | `<name>: { type: claude-code \| codex \| webhook \| stdio, … }` | claude-code: `cwd`, `permission_mode`, `allowed_tools`, `model`, `worktree`, `worktree_links`, `git_token`. codex: `cwd`, `sandbox`, `model`, and the same `worktree` settings. webhook: `url`, `headers`, `timeout`. stdio: `command`, `args`, `cwd`, `env`, `timeout` |
 | `tools` | `<name>: { command, args, env }` or `{ url, headers, oauth }` | MCP tool servers; `oauth: true` signs in with `bridge auth <name>` |
 | `routes` | `{ from, when, to }` | `from`: an IM address or an agent. `when`: `mention`, `listen`, `sender`. `to`: one agent (from IM), or agents and `server.tool` globs (from an agent) |
 | `policies` | `{ match: { tool, agent, writes }, approve_by, timeout, max_hops, budget_usd }` | Every key of `match` must hold; all applying policies count and the strictest wins |

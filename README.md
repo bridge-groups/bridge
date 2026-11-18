@@ -6,11 +6,11 @@ Connects **agents ↔ IM**, **agents ↔ agents** and **agents ↔ tools**. Two 
 - **The library**, `@bridge-groups/bridge`, embedded in an app or service that keeps users' configuration and secrets itself, with one bridge per user if it serves several. See [doc/library.md](doc/library.md).
 
 - **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound so you need no public URL. Telegram (long polling) is written but not yet tested against the real service.
-- **Agents**: Claude Code (headless `claude -p`), any HTTP webhook, or any local process speaking JSON lines.
+- **Agents**: Claude Code (headless `claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON lines.
 - **Tools**: external MCP servers. The bridge connects to them with its own credentials and gives each agent only what its routes allow, with approvals where policies say so.
 - **Everything is routed and audited**: routes are first-match and deny-by-default, and every message, tool call and approval lands in a SQLite trace with secrets redacted.
 
-Each agent turn gets a session-scoped MCP endpoint (`/mcp/<token>`) with these tools:
+Each agent turn gets a session-scoped MCP endpoint (`/mcp/<token>`, or `/mcp` with `Authorization: Bearer <token>`) with these tools:
 
 | tool | what it does |
 |---|---|
@@ -66,7 +66,7 @@ node out/cli.js routes explain --from slack:#dev --sender alice --mention
 node out/cli.js up
 ```
 
-Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `deny` / `yes` also work). A `budget_usd` policy is a per-conversation cap: each turn is started with only what is left (Claude Code gets it as `--max-budget-usd`). Agents check their cap between model requests, so a turn can end up to one request over it; to keep that from happening, a turn starts only when what is left covers the agent's cheapest recent turn. A refused turn is answered in the chat and recorded in the audit trail as `budget`.
+Approvals and merge/discard confirmations are Slack buttons (typed `approve` / `deny` / `yes` also work). A `budget_usd` policy is a per-conversation cap: each turn is started with only what is left (Claude Code gets it as `--max-budget-usd`). Codex reports tokens rather than dollars, so budgets don't limit `codex` agents. Agents check their cap between model requests, so a turn can end up to one request over it; to keep that from happening, a turn starts only when what is left covers the agent's cheapest recent turn. A refused turn is answered in the chat and recorded in the audit trail as `budget`.
 
 `bridge.yaml` is hot-reloaded. An agent whose settings changed gets a new process for its next turn; turns already running finish on the old one. Changing IM credentials needs a restart.
 
@@ -96,11 +96,11 @@ node out/cli.js service status
 node out/cli.js service uninstall
 ```
 
-Logs go to `~/Library/Logs/bridge/bridge.log` (launchd can't write into `~/Documents`). The service starts with a bare environment, so `install` refuses a config that uses `env:` references or names secrets missing from the keychain. When the bridge shuts down or a Claude Code turn is stopped, the agent processes and the commands they run get SIGTERM and, 5 seconds later, SIGKILL (a process an agent deliberately detached, such as `nohup … &`, is not tracked). A turn cut off by a restart resumes in the same agent session (at most twice), and anything queued while the bridge was down runs when it comes back, within `offline_queue_ttl`.
+Logs go to `~/Library/Logs/bridge/bridge.log` (launchd can't write into `~/Documents`). The service starts with a bare environment, so `install` refuses a config that uses `env:` references or names secrets missing from the keychain. When the bridge shuts down or a Claude Code or Codex turn is stopped, the agent processes and the commands they run get SIGTERM and, 5 seconds later, SIGKILL (a process an agent deliberately detached, such as `nohup … &`, is not tracked). A turn cut off by a restart resumes in the same agent session (at most twice), and anything queued while the bridge was down runs when it comes back, within `offline_queue_ttl`.
 
 ### Parallel conversations on one repo
 
-With `worktree: true` on a `claude-code` agent (needs git 2.38 or later), each conversation gets its own git worktree under `worktree_dir` on branch `bridge/<conversation>`, so two threads never edit the same checkout. Use `worktree_links` to link untracked things like `node_modules` from the main checkout; they are added to the repository's `.git/info/exclude`, so an agent's `git add -A` never commits the links.
+With `worktree: true` on a `claude-code` or `codex` agent (needs git 2.38 or later), each conversation gets its own git worktree under `worktree_dir` on branch `bridge/<conversation>`, so two threads never edit the same checkout. Use `worktree_links` to link untracked things like `node_modules` from the main checkout; they are added to the repository's `.git/info/exclude`, so an agent's `git add -A` never commits the links.
 
 Finish a conversation's branch from the thread itself (a message that is exactly the word):
 
@@ -120,7 +120,7 @@ node out/cli.js worktrees prune --older-than 7d    # remove idle ones with nothi
 
 ## Routing rules
 
-- An IM route goes to exactly one agent. A route to an agent that runs on this machine (`claude-code`, `stdio`) must name `when.sender`, or say `sender: anyone` explicitly.
+- An IM route goes to exactly one agent. A route to an agent that runs on this machine (`claude-code`, `codex`, `stdio`) must name `when.sender`, or say `sender: anyone` explicitly.
 - In channels the bot must be @-mentioned, unless `listen: all`. A reply in a thread the agent already holds continues it without a mention. DMs need no mention.
 - `@bot data-agent …` addresses an agent by name when one channel has several.
 - `when.mention` makes it explicit: `true` needs the mention (a DM counts as one), `false` needs none (like `listen: all`), and `<agent>` needs the mention *and* the agent's name at the start (`@bot data-agent …`), so several agents can share a channel without catching each other's messages.
@@ -155,7 +155,9 @@ Writes must be same-origin JSON and requests must carry a loopback `Host`, so ot
 
 ## Agent protocols
 
-**Webhook**: `POST <url>` with `{"type":"turn","text","session_id","budget_usd","envelope","mcp":{"url"}}` (`budget_usd` is what is left of the conversation budget, or null). Respond with `{"text","session_id"?,"cost_usd"?}`.
+**Codex**: `codex exec --json` per turn, resuming the conversation's Codex session. `sandbox` (default `workspace-write`: write in the working directory, no network; or `read-only`, `danger-full-access`) bounds its commands; nobody is asked to approve one, so what the sandbox refuses fails. The bridge's MCP endpoint and instructions are passed with `-c`; the turn's token goes in the environment, not on the command line. Codex uses your own `~/.codex` login and config, including the MCP servers listed there.
+
+**Webhook**: `POST <url>` with `{"type":"turn","text","session_id","budget_usd","envelope","mcp":{"url"}}` (`budget_usd` is what is left of the conversation budget, or null). Respond with `{"text","session_id"?,"cost_usd"?}`, or with `text/event-stream` to report progress while working: each event's `data` is one of the stdio agent's messages without `id` (`{"type":"progress","text"}`, `{"type":"session","session_id"}`, then `{"type":"reply",…}` or `{"type":"error","message"}`). The agent's `timeout` covers the whole stream; stopping the turn closes it.
 
 **stdio**: a long-running process. The bridge writes `{"type":"turn","id",…}` lines to it, and it writes back `{"type":"progress","id","text"}`, `{"type":"reply","id","text","session_id"?,"cost_usd"?}` or `{"type":"error","id","message"}`. When a turn is stopped or gets no reply within the agent's `timeout` (default `30m`), the bridge writes `{"type":"cancel","id"}` and ignores anything that comes back for that id. See [src/examples/echo-agent.mjs](src/examples/echo-agent.mjs).
 
@@ -181,7 +183,7 @@ src/
   mcp/oauth.ts           OAuth sign-in for remote tool servers (browser flow)
   web/                   the CLI's local dashboard: JSON API + one self-contained page
   adapters/im/           slack, feishu / lark, telegram, local console
-  adapters/agent/        webhook (remote); claude-code and stdio (local, opt-in)
+  adapters/agent/        webhook (remote); claude-code, codex and stdio (local, opt-in)
   examples/              example agents
   test/                  tests, helpers, fixtures
 doc/                     documentation and reference files
@@ -192,7 +194,7 @@ Contributing: see [AGENTS.md](AGENTS.md).
 ## Not in v0.1 yet
 
 - Discord adapter; Telegram tested end to end
-- Codex wrapper, A2A, webhook SSE streaming
+- A2A
 - Strict policy on `tainted` envelopes (today the flag only keeps `initiator` from approving)
 - A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP events, per-user isolation and limits, agents that run user code in sandboxes
 

@@ -10,8 +10,12 @@ export interface AgentTurn {
   files?: { name: string; path: string; mime?: string }[];
   /** USD left in this conversation's budget; agents should stop before spending more. */
   budgetUsd?: number;
-  /** Session-scoped MCP endpoint the agent can call back into (send_message, ask_human, delegate, tools). */
-  mcp: { url: string; token: string };
+  /**
+   * Session-scoped MCP endpoint the agent can call back into (send_message, ask_human, delegate, tools): `url`
+   * carries the token in its path; `endpoint` is the same server for clients that send the token as
+   * `Authorization: Bearer <token>` instead, which keeps it out of a command line.
+   */
+  mcp: { url: string; endpoint: string; token: string };
   /** Short progress lines ("Reading src/…"). */
   onProgress?: (line: string) => void;
   /** The agent's session id, as soon as it is known (lets a crashed turn be resumed). */

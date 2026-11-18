@@ -147,9 +147,6 @@
                 "type": "string",
                 "const": "claude-code"
               },
-              "cwd": {
-                "type": "string"
-              },
               "command": {
                 "default": "claude",
                 "type": "string"
@@ -170,6 +167,63 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "worktree": {
+                "default": false,
+                "type": "boolean"
+              },
+              "worktree_dir": {
+                "default": "~/.bridge/worktrees",
+                "type": "string"
+              },
+              "worktree_links": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "git_token": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "codex"
+              },
+              "command": {
+                "default": "codex",
+                "type": "string"
+              },
+              "sandbox": {
+                "default": "workspace-write",
+                "type": "string",
+                "enum": [
+                  "read-only",
+                  "workspace-write",
+                  "danger-full-access"
+                ]
+              },
+              "cwd": {
+                "type": "string"
               },
               "model": {
                 "type": "string"

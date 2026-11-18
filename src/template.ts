@@ -36,6 +36,10 @@ agents:
   #   type: claude-code
   #   cwd: ~/code/my-app
   #   permission_mode: acceptEdits
+  # codex:
+  #   type: codex
+  #   cwd: ~/code/my-app
+  #   sandbox: workspace-write
   # data-agent:
   #   type: webhook
   #   url: http://localhost:8080/agent

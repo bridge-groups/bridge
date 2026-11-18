@@ -220,11 +220,15 @@ button:disabled { opacity: .5; cursor: default; }
     });
   }
 
+  // One line per config change, as describeChanges() writes it: "+" widens, "-" narrows, "~" neither.
+  function changeLine(c) {
+    return (c.widens ? '+ ' : c.kind === 'removed' ? '- ' : '~ ') + c.section + ' ' + c.kind + ': ' + c.key +
+      (c.fields && c.fields.length ? ' (' + c.fields.join(', ') + ')' : '');
+  }
+
   // A bridge.yaml change that widens access: apply or reject it as the owner.
   function configRow(p) {
-    var lines = p.changes.map(function (c) {
-      return (c.widens ? '+ ' : c.kind === 'removed' ? '- ' : '~ ') + c.section + ' ' + c.kind + ': ' + c.key;
-    });
+    var lines = p.changes.map(changeLine);
     function decide(action, label) {
       return function (ev) {
         ev.target.disabled = true;
@@ -314,7 +318,7 @@ button:disabled { opacity: .5; cursor: default; }
       if (kind === 'choice') return { text: d.outcome };
       if (kind === 'ignored') return { text: d.text, note: 'no route' };
       if (kind === 'command') return { text: d.command };
-      if (kind === 'config') return { text: d.outcome + ' ' + d.sha + (d.by ? ' by ' + d.by : ''), raw: (d.changes || []).map(function (c) { return (c.widens ? '+ ' : c.kind === 'removed' ? '- ' : '~ ') + c.section + ' ' + c.kind + ': ' + c.key; }).join('\n') };
+      if (kind === 'config') return { text: d.outcome + ' ' + d.sha + (d.by ? ' by ' + d.by : ''), raw: (d.changes || []).map(changeLine).join('\n') };
       if (kind === 'budget') return { text: 'turn not started: ' + money(d.leftUsd) + ' of ' + money(d.budgetUsd) + ' left' + (d.cheapestTurnUsd != null ? ', cheapest recent turn ' + money(d.cheapestTurnUsd) : '') };
       if (kind === 'error') return { text: d.message || d.error || detail };
     }

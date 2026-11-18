@@ -7,7 +7,7 @@ secrets itself. The `bridge` command is one such app, for your own machine.
 | Entry point | What it holds |
 | --- | --- |
 | `@bridge-groups/bridge` | `Bridge`, config parsing and checks (`parseConfig`, `checkConfig`, `configChanges`), `SqliteStore` and the `BridgeStore` interface, `Redactor`, `envSecrets`, IM adapters (Slack, Feishu / Lark, Telegram), `WebhookAgent`, `ToolHub`, OAuth storage |
-| `@bridge-groups/bridge/local` | `localAgents`: Claude Code (with git worktrees) and stdio agents, which run code on this machine; `LocalConsoleAdapter` |
+| `@bridge-groups/bridge/local` | `localAgents`: Claude Code and Codex (with git worktrees) and stdio agents, which run code on this machine; `LocalConsoleAdapter` |
 
 Nothing in the main entry point reads a config file, the OS keychain or the local dashboard; a test keeps it that way.
 
@@ -46,7 +46,7 @@ await bridge.start();
 - **Secrets.** `secrets` resolves every `secret:` / `env:` reference the bridge meets (default: `envSecrets()`,
   the environment only). Every value it returns is redacted from that bridge's audit trail.
 - **Agents.** By default only remote agents (`webhook`) are built from the config. Pass
-  `agentFactory: localAgents` from `/local` to run Claude Code and stdio agents on the host. A service running
+  `agentFactory: localAgents` from `/local` to run Claude Code, Codex and stdio agents on the host. A service running
   other people's bridges should not, or should run each bridge in its own sandbox. `agents` takes adapters you
   build yourself (any `AgentAdapter`).
 - **Store.** `BridgeStore` holds conversations, the inbound queue (turns resume after a restart) and the audit

@@ -599,7 +599,7 @@ export class Bridge implements HubBackend, WebBackend {
         files: ctx.envelope.content.flatMap((b) =>
           b.type === 'file' && b.path ? [{ name: b.name, path: b.path, mime: b.mime }] : [],
         ),
-        mcp: { url: grant.url, token: grant.token },
+        mcp: { url: grant.url, endpoint: grant.endpoint, token: grant.token },
         onProgress: opts.onProgress,
         onSessionId: (id) => this.later(() => this.store.updateSession(ctx.sessionKey, { agent_session_id: id })),
         onNotice: (note) => void this.notify(ctx.thread, note),

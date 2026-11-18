@@ -161,7 +161,7 @@ async function main() {
       const cutoff = Date.now() - parseDuration(values['older-than']!);
       let count = 0;
       for (const [name, agent] of Object.entries(cfg.agents)) {
-        if (agent.type !== 'claude-code' || !agent.worktree) continue;
+        if ((agent.type !== 'claude-code' && agent.type !== 'codex') || !agent.worktree) continue;
         for (const wt of await listWorktrees(expandHome(agent.cwd ?? process.cwd()))) {
           const session = sessions.get(wt.branch.replace(/^bridge\//, ''));
           const last = session?.last_active;
@@ -355,7 +355,7 @@ async function doctor(configPath: string) {
     }
   }
   for (const [name, a] of Object.entries(c.agents)) {
-    if (a.type === 'claude-code') {
+    if (a.type === 'claude-code' || a.type === 'codex') {
       await check(`agent ${name}`, () => execFileSync(a.command, ['--version'], { encoding: 'utf8' }).trim());
     } else if (a.type === 'stdio') {
       await check(`agent ${name}`, () => execFileSync('which', [a.command], { encoding: 'utf8' }).trim());

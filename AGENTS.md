@@ -89,7 +89,7 @@ src/                     all source code
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
   web/                   local dashboard: JSON API + one self-contained page
   adapters/im/           Slack, Feishu / Lark, Telegram, local console (+ Markdown renderers)
-  adapters/agent/        webhook (remote); claude-code (with git worktrees) and stdio (local, opt-in)
+  adapters/agent/        webhook (remote); claude-code and codex (with git worktrees) and stdio (local, opt-in)
   examples/              example agents (shipped)
   test/                  node:test suites, helpers and fixtures (not shipped)
 doc/                     documentation and reference files (bridge.schema.json is generated: `bridge schema`)

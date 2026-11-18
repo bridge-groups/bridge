@@ -8,7 +8,7 @@ export type AgentFactory = (name: string, cfg: AgentConfig, ctx: { secrets: Secr
 
 /**
  * Agents that run elsewhere and are reached over the network. Agents that run code on this machine
- * (claude-code, stdio) come from `localAgents` in the `/local` entry point, which an embedding app opts into.
+ * (claude-code, codex, stdio) come from `localAgents` in the `/local` entry point, which an embedding app opts into.
  */
 export const remoteAgents: AgentFactory = (name, cfg, { secrets }) => {
   if (cfg.type === 'webhook') return new WebhookAgent(name, cfg, secrets);

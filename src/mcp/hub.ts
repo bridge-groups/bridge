@@ -22,8 +22,10 @@ export interface HubBackend {
 }
 
 /**
- * The bridge's MCP endpoints. Each agent turn gets its own URL (`<base>/mcp/<token>`), so every tool call is
- * tied to the session that made it and nothing else. Served by whatever HTTP server the bridge is mounted on.
+ * The bridge's MCP endpoints. Each agent turn gets its own token, so every tool call is tied to the session that
+ * made it and nothing else. The token goes in the path (`<base>/mcp/<token>`), or, for clients that are told
+ * the URL on a command line, in `Authorization: Bearer <token>` to `<base>/mcp`. Served by whatever HTTP server
+ * the bridge is mounted on.
  */
 export class McpHub {
   private readonly grants = new Map<string, SessionGrant>();
@@ -36,19 +38,22 @@ export class McpHub {
     this.baseUrl = baseUrl;
   }
 
-  grant(g: SessionGrant): { url: string; token: string; revoke: () => void } {
+  grant(g: SessionGrant): { url: string; endpoint: string; token: string; revoke: () => void } {
     const token = randomBytes(18).toString('base64url');
     this.grants.set(token, g);
-    return { url: `${this.baseUrl()}/mcp/${token}`, token, revoke: () => this.grants.delete(token) };
+    const endpoint = `${this.baseUrl()}/mcp`;
+    return { url: `${endpoint}/${token}`, endpoint, token, revoke: () => this.grants.delete(token) };
   }
 
-  /** Serve `/mcp/<token>` (path relative to where the bridge is mounted); false for any other path. */
+  /** Serve `/mcp/<token>` and `/mcp` (path relative to where the bridge is mounted); false for any other path. */
   async handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
-    const m = /^\/mcp\/([A-Za-z0-9_-]+)$/.exec(path);
+    const m = /^\/mcp(?:\/([A-Za-z0-9_-]+))?$/.exec(path);
     if (!m) return false;
-    const grant = this.grants.get(m[1]!);
+    const token = m[1] ?? /^Bearer ([A-Za-z0-9_-]+)$/i.exec(req.headers.authorization ?? '')?.[1];
+    const grant = token === undefined ? undefined : this.grants.get(token);
     if (!grant) {
-      res.writeHead(404).end();
+      // 404 for a token in the path, like any other unknown URL; 401 when the header is missing or stale.
+      res.writeHead(m[1] ? 404 : 401).end();
       return true;
     }
     const body = req.method === 'POST' ? await readJson(req) : undefined;

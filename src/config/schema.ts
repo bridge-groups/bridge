@@ -54,23 +54,43 @@ const ImConfig = z
   .strict()
   .default({});
 
+/** Settings of the coding agents that run as a CLI per turn (claude-code, codex). */
+const codingAgentFields = {
+  cwd: z.string().optional(),
+  model: z.string().optional(),
+  /** Give every conversation its own git worktree + branch so parallel threads never touch the same checkout. */
+  worktree: z.boolean().default(false),
+  worktree_dir: z.string().default('~/.bridge/worktrees'),
+  /** Untracked paths linked into each worktree from the main checkout (e.g. node_modules, .env). */
+  worktree_links: z.array(z.string()).default([]),
+  /** Token used to push conversation branches and open PRs (the `pr` command). */
+  git_token: SecretRef.optional(),
+  description: z.string().optional(),
+};
+
 const ClaudeCodeAgent = z
   .object({
     type: z.literal('claude-code'),
-    cwd: z.string().optional(),
     /** Path to the `claude` executable. */
     command: z.string().default('claude'),
     permission_mode: z.enum(['default', 'acceptEdits', 'plan', 'bypassPermissions']).default('default'),
     allowed_tools: z.array(z.string()).default([]),
-    model: z.string().optional(),
-    /** Give every conversation its own git worktree + branch so parallel threads never touch the same checkout. */
-    worktree: z.boolean().default(false),
-    worktree_dir: z.string().default('~/.bridge/worktrees'),
-    /** Untracked paths linked into each worktree from the main checkout (e.g. node_modules, .env). */
-    worktree_links: z.array(z.string()).default([]),
-    /** Token used to push conversation branches and open PRs (the `pr` command). */
-    git_token: SecretRef.optional(),
-    description: z.string().optional(),
+    ...codingAgentFields,
+  })
+  .strict();
+
+const CodexAgent = z
+  .object({
+    type: z.literal('codex'),
+    /** Path to the `codex` executable. */
+    command: z.string().default('codex'),
+    /**
+     * What Codex's commands may do: read-only; workspace-write (write in the working directory, no network);
+     * danger-full-access (anything you can). Commands are never put to you for approval: what the sandbox
+     * refuses fails.
+     */
+    sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']).default('workspace-write'),
+    ...codingAgentFields,
   })
   .strict();
 
@@ -97,7 +117,7 @@ const StdioAgent = z
   })
   .strict();
 
-export const AgentConfig = z.discriminatedUnion('type', [ClaudeCodeAgent, WebhookAgent, StdioAgent]);
+export const AgentConfig = z.discriminatedUnion('type', [ClaudeCodeAgent, CodexAgent, WebhookAgent, StdioAgent]);
 export type AgentConfig = z.infer<typeof AgentConfig>;
 
 /** An external tool server the bridge proxies: a local MCP process (stdio)… */

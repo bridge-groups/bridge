@@ -31,12 +31,14 @@ test('library: the lib entry point never loads the CLI, the keychain, the dashbo
   const cliOnly = [
     'cli.ts', 'secrets.ts', 'keychain-oauth.ts', 'service.ts', 'template.ts', 'config/gate.ts',
     'web/api.ts', 'web/page.ts',
-    'adapters/agent/local.ts', 'adapters/agent/claude-code.ts', 'adapters/agent/stdio.ts', 'adapters/agent/worktree.ts',
+    'adapters/agent/local.ts', 'adapters/agent/cli-agent.ts', 'adapters/agent/claude-code.ts', 'adapters/agent/codex.ts',
+    'adapters/agent/stdio.ts', 'adapters/agent/worktree.ts',
   ];
   assert.deepEqual(cliOnly.filter((f) => lib.has(f)), []);
   assert.ok(lib.has('core/bridge.ts') && lib.has('adapters/im/slack.ts'));
   // The opt-in entry point is where local agents come from.
-  assert.ok(runtimeGraph('local.ts').has('adapters/agent/claude-code.ts'));
+  const local = runtimeGraph('local.ts');
+  assert.ok(local.has('adapters/agent/claude-code.ts') && local.has('adapters/agent/codex.ts'));
 });
 
 const tenantConfig = `
@@ -71,7 +73,12 @@ test('library: bridges for several users share one HTTP server, each with its ow
     async run(turn) {
       seenUrls.push(turn.mcp.url);
       const client = new Client({ name: 'helper', version: '0' });
-      await client.connect(new StreamableHTTPClientTransport(new URL(turn.mcp.url)));
+      // Alice's agent sends the token as a header to the shared endpoint; Bob's has it in the URL.
+      const viaHeader = turn.mcp.url.includes('/u/alice/');
+      const transport = viaHeader
+        ? new StreamableHTTPClientTransport(new URL(turn.mcp.endpoint), { requestInit: { headers: { Authorization: `Bearer ${turn.mcp.token}` } } })
+        : new StreamableHTTPClientTransport(new URL(turn.mcp.url));
+      await client.connect(transport);
       try {
         const { tools } = await client.listTools();
         return { text: `tools: ${tools.map((t) => t.name).sort().join(',')} | crm-token-alice-0001 crm-token-bob-00002` };
@@ -119,6 +126,9 @@ test('library: bridges for several users share one HTTP server, each with its ow
     assert.equal(await (await fetch(`http://127.0.0.1:${port}/u/alice/other`)).text(), 'the app');
     assert.equal(await (await fetch(`http://127.0.0.1:${port}/elsewhere`)).text(), 'the app');
     assert.equal((await fetch(`http://127.0.0.1:${port}/u/alice/mcp/not-a-token`, { method: 'POST' })).status, 404);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/u/alice/mcp`, { method: 'POST' })).status, 401);
+    const stale = { method: 'POST', headers: { authorization: 'Bearer not-a-token' } };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/u/alice/mcp`, stale)).status, 401);
 
     // Without the local agents factory, an agent that would run on this machine is refused.
     ims[0]!.receive({ userId: 'U1', text: 'hi', channelName: 'ops' });

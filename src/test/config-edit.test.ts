@@ -132,6 +132,46 @@ test('changes: new reach widens access, removed reach does not', () => {
   assert.ok(!quiet(BASE.replace('server: { port: 0 }', 'server: { port: 0, host: 0.0.0.0 }')), 'a public listener widens');
 });
 
+test('changes: an agent or tool server is compared setting by setting', () => {
+  const AGENTS = `people: { alice: { trust: owner, slack: U1 } }
+agents:
+  cc: { type: claude-code, permission_mode: acceptEdits, allowed_tools: ["Bash(git status:*)", "Bash(npm test:*)"], worktree: true }
+  cx: { type: codex, sandbox: workspace-write }
+tools:
+  gh: { url: "https://example.com/mcp" }
+routes:
+  - { from: "local:dm", when: { sender: [alice] }, to: cc }
+`;
+  const base = cfg(AGENTS);
+  const change = (from: string, to: string) => {
+    const next = AGENTS.replace(from, to);
+    assert.notEqual(next, AGENTS, `no "${from}" in the fixture`);
+    const [c, ...rest] = configChanges(base, cfg(next));
+    assert.equal(rest.length, 0);
+    return { widens: c!.widens, fields: c!.fields };
+  };
+
+  // Descriptive and pacing settings need no one.
+  assert.deepEqual(change('worktree: true }', 'worktree: true, description: "new words", model: opus }'), {
+    widens: false,
+    fields: ['description', 'model'],
+  });
+  assert.deepEqual(change('{ url: "https://example.com/mcp" }', '{ url: "https://example.com/mcp", timeout: 10m }'), { widens: false, fields: ['timeout'] });
+  // Moving toward less access narrows; toward more widens.
+  assert.equal(change('permission_mode: acceptEdits', 'permission_mode: plan').widens, false);
+  assert.equal(change('permission_mode: acceptEdits', 'permission_mode: bypassPermissions').widens, true);
+  assert.equal(change('sandbox: workspace-write', 'sandbox: read-only').widens, false);
+  assert.equal(change('sandbox: workspace-write', 'sandbox: danger-full-access').widens, true);
+  assert.equal(change(', "Bash(npm test:*)"]', ']').widens, false, 'a pre-approved tool removed');
+  assert.equal(change('"Bash(npm test:*)"]', '"Bash(npm test:*)", "Bash(rm:*)"]').widens, true, 'a pre-approved tool added');
+  assert.equal(change('worktree: true', 'worktree: false').widens, true, 'off its own branch, onto your checkout');
+  // Anything that says where or what it runs widens, even next to an inert change.
+  assert.deepEqual(change('type: codex, sandbox', 'type: codex, description: x, cwd: /tmp, sandbox'), { widens: true, fields: ['cwd', 'description'] });
+  assert.equal(change('example.com/mcp', 'example.org/mcp').widens, true);
+  // Changing the type replaces the agent's settings wholesale.
+  assert.equal(change('cx: { type: codex, sandbox: workspace-write }', 'cx: { type: stdio, command: "true" }').widens, true);
+});
+
 // ───────────────────────── the gate ─────────────────────────
 
 function gateFixture() {
