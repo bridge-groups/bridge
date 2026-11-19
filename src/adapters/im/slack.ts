@@ -21,18 +21,19 @@ export class SlackAdapter implements ImAdapter {
   private botUserId = '';
   private readonly channelName = channelNames(async (id) => (await this.web.conversations.info({ channel: id })).channel?.name);
 
+  private onMessage?: (msg: InboundMessage) => void;
+  private onAction?: (action: InboundAction) => void;
+
   constructor(opts: { appToken: string; botToken: string }) {
     this.web = new WebClient(opts.botToken);
     this.botToken = opts.botToken;
     this.socket = new SocketModeClient({ appToken: opts.appToken });
-  }
-
-  async start(onMessage: (msg: InboundMessage) => void, onAction?: (action: InboundAction) => void) {
+    // Registered once, so a start retried after a failure never delivers an event twice.
     this.socket.on('interactive', async ({ body, ack }: { body: any; ack: () => Promise<void> }) => {
       await ack();
-      if (body?.type !== 'block_actions' || !onAction) return;
+      if (body?.type !== 'block_actions' || !this.onAction) return;
       for (const a of body.actions ?? []) {
-        onAction({
+        this.onAction({
           platform: 'slack',
           channelId: body.channel?.id ?? body.container?.channel_id,
           userId: body.user?.id,
@@ -41,15 +42,13 @@ export class SlackAdapter implements ImAdapter {
         });
       }
     });
-    const auth = await this.web.auth.test();
-    this.botUserId = String(auth.user_id);
     this.socket.on('message', async ({ event, ack }: { event: any; ack: () => Promise<void> }) => {
       await ack();
-      if (!isPersonMessage(event, this.botUserId)) return;
+      if (!this.onMessage || !isPersonMessage(event, this.botUserId)) return;
       const mentionTag = `<@${this.botUserId}>`;
       const raw = String(event.text ?? '');
       const isDM = event.channel_type === 'im';
-      onMessage({
+      this.onMessage({
         platform: 'slack',
         channelId: event.channel,
         channelName: isDM ? 'dm' : await this.channelName(event.channel),
@@ -62,6 +61,13 @@ export class SlackAdapter implements ImAdapter {
         files: (event.files ?? []).map((f: any) => this.file(f)),
       });
     });
+  }
+
+  async start(onMessage: (msg: InboundMessage) => void, onAction?: (action: InboundAction) => void) {
+    const auth = await this.web.auth.test();
+    this.botUserId = String(auth.user_id);
+    this.onMessage = onMessage;
+    this.onAction = onAction;
     await this.socket.start();
   }
 

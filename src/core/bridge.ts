@@ -105,6 +105,30 @@ export interface BridgeOptions {
   tempDir?: string;
   /** Where log lines go (default: the console); `error` marks failures someone should look at. */
   log?: (line: string, level: 'info' | 'error') => void;
+  /** How long an IM that failed to connect waits before the next try: `firstMs`, doubling up to `maxMs` (default 1 min to 30 min). */
+  imRetry?: { firstMs: number; maxMs: number };
+}
+
+/**
+ * One IM connection (see `Bridge.status`). An IM that fails to connect is `down` and is tried again with backoff;
+ * the others keep working. `since` is when it entered this state; `error` says why it is down, without secrets.
+ */
+export interface ImConnection {
+  platform: string;
+  state: 'connecting' | 'connected' | 'down';
+  since: number;
+  error?: string;
+  /** When a down IM is tried next. */
+  retryAt?: number;
+}
+
+interface ImLink extends ImConnection {
+  im: ImAdapter;
+  /** Failed tries in a row, for the backoff. */
+  failures: number;
+  timer?: NodeJS.Timeout;
+  /** Resolved once connected (or stopping): this IM's conversations wait for it. */
+  ready: PromiseWithResolvers<void>;
 }
 
 /** A conversation, for the app (see `Bridge.sessions`). */
@@ -189,7 +213,9 @@ export class Bridge implements HubBackend {
   private router: Router;
   private policies: PolicyEngine;
   private readonly store: BridgeStore;
-  private readonly ims = new Map<string, ImAdapter>();
+  /** Every IM by platform, with the state of its connection. */
+  private readonly ims = new Map<string, ImLink>();
+  private readonly imRetry: { firstMs: number; maxMs: number };
   private readonly agents = new Map<string, AgentAdapter>();
   private readonly injectedAgents: Set<string>;
   private readonly tools: ToolHub;
@@ -247,8 +273,6 @@ export class Bridge implements HubBackend {
   private firstCleanUp?: NodeJS.Timeout;
   /** Set by stop(): no new turns start, and interrupted ones stay queued to resume on the next start. */
   private stopping = false;
-  /** Queued work waits for this, so nothing runs before the IMs are connected. */
-  private readonly ready = Promise.withResolvers<void>();
 
   constructor(opts: BridgeOptions) {
     this.cfg = opts.cfg;
@@ -267,7 +291,10 @@ export class Bridge implements HubBackend {
     this.router = new Router(opts.cfg);
     this.policies = new PolicyEngine(opts.cfg);
     this.store = opts.store;
-    for (const im of opts.ims) this.ims.set(im.platform, im);
+    for (const im of opts.ims) {
+      this.ims.set(im.platform, { im, platform: im.platform, state: 'connecting', since: Date.now(), failures: 0, ready: Promise.withResolvers() });
+    }
+    this.imRetry = opts.imRetry ?? { firstMs: 60e3, maxMs: 30 * 60e3 };
     for (const [k, v] of opts.agents ?? []) this.agents.set(k, v);
     this.injectedAgents = new Set(opts.agents?.keys() ?? []);
     const oauthStorage = watchTokens(opts.oauthStorage ?? memoryStorage(), (t) => this.redactor.add(t));
@@ -286,6 +313,8 @@ export class Bridge implements HubBackend {
   /**
    * Connect the IMs and start routing. Without mcpBaseUrl the bridge also starts its own HTTP server on
    * cfg.server; with it, the app serves `handle` and nothing listens here. Returns where agents reach the bridge.
+   * An IM that fails to connect does not fail the start: it is reported (`status`, a DM to the owners on an IM
+   * that works) and tried again with backoff, and its conversations wait for it.
    */
   async start(): Promise<{ mcpUrl: string }> {
     privateDir(this.tempDir);
@@ -294,15 +323,10 @@ export class Bridge implements HubBackend {
     // Work left over from the last run takes its place in the queues before any new message can;
     // it runs once the IMs are connected (see `ready`).
     await this.replayQueue();
-    for (const im of this.ims.values()) {
-      await im.start(
-        (msg) => this.track(this.handleInbound(msg).catch((e) => this.warn(`inbound error: ${e?.stack ?? e}`))),
-        (action) => this.track(this.handleAction(action).catch((e) => this.warn(`action error: ${e?.stack ?? e}`))),
-      );
-      this.log(`connected ${im.platform}`);
-    }
+    await Promise.all([...this.ims.values()].map((link) => this.connect(link)));
     this.startedAt = Date.now();
-    this.ready.resolve();
+    const down = [...this.ims.values()].filter((l) => l.state === 'down');
+    if (down.length) this.tellOwners(down.map((l) => this.downNotice(l)).join('\n'));
     this.housekeeping = setInterval(() => void this.cleanUp(), HOUSEKEEPING_MS);
     this.housekeeping.unref();
     this.firstCleanUp = setTimeout(() => void this.cleanUp(), FIRST_HOUSEKEEPING_MS);
@@ -318,17 +342,108 @@ export class Bridge implements HubBackend {
     this.stopping = true;
     clearInterval(this.housekeeping);
     clearTimeout(this.firstCleanUp);
-    this.ready.resolve();
+    for (const link of this.ims.values()) {
+      clearTimeout(link.timer);
+      link.ready.resolve();
+    }
     for (const ctx of this.active.values()) ctx.controller.abort(new ShuttingDown());
     for (const list of [...this.waiters.values()]) for (const w of [...list]) w.cancel('the bridge is shutting down');
     for (const a of new Set([...this.agents.values(), ...this.retiring])) {
       await a.stop?.().catch((err) => this.warn(`stopping agent ${a.name} failed: ${(err as Error).message}`));
     }
     await this.idle();
-    for (const im of this.ims.values()) await im.stop().catch((err) => this.warn(`disconnecting ${im.platform} failed: ${(err as Error).message}`));
+    // A down IM holds no connection (see ImAdapter.start).
+    for (const { im, state } of this.ims.values()) {
+      if (state !== 'down') await im.stop().catch((err) => this.warn(`disconnecting ${im.platform} failed: ${(err as Error).message}`));
+    }
     await this.tools.stop();
     await new Promise<void>((resolve) => (this.http ? this.http.close(() => resolve()) : resolve()));
     await this.flushWrites();
+  }
+
+  /**
+   * Try to connect one IM. A failure marks it down and schedules the next try (backoff); the owners hear when an
+   * IM goes down after the start and when it is back (the start reports its own failures together).
+   */
+  private async connect(link: ImLink): Promise<void> {
+    const { im, platform } = link;
+    try {
+      await im.start(
+        (msg) => this.track(this.handleInbound(msg).catch((e) => this.warn(`inbound error: ${e?.stack ?? e}`))),
+        (action) => this.track(this.handleAction(action).catch((e) => this.warn(`action error: ${e?.stack ?? e}`))),
+      );
+    } catch (err) {
+      if (this.stopping) return;
+      const first = link.state !== 'down';
+      const delay = Math.min(this.imRetry.firstMs * 2 ** link.failures, this.imRetry.maxMs);
+      link.failures++;
+      link.state = 'down';
+      if (first) link.since = Date.now();
+      link.error = this.redactor.redact(String((err as Error)?.message ?? err)).slice(0, 500);
+      link.retryAt = Date.now() + delay;
+      link.timer = setTimeout(() => void this.connect(link), delay);
+      link.timer.unref();
+      this.warn(`${platform} is not connected: ${link.error} (next try in ${duration(delay)}; the other IMs keep working)`);
+      if (first) {
+        this.trace('-', 'im', platform, { state: 'down', error: link.error });
+        if (this.startedAt) this.tellOwners(this.downNotice(link));
+      }
+      return;
+    }
+    if (this.stopping) {
+      // stop() ran while this start was in flight: close what it just opened.
+      await im.stop().catch((err) => this.warn(`disconnecting ${platform} failed: ${(err as Error).message}`));
+      return;
+    }
+    const wasDown = link.state === 'down';
+    Object.assign(link, { state: 'connected', since: Date.now(), error: undefined, retryAt: undefined, failures: 0, timer: undefined });
+    link.ready.resolve();
+    this.log(`connected ${platform}`);
+    if (wasDown) {
+      this.trace('-', 'im', platform, { state: 'connected' });
+      if (this.startedAt) this.tellOwners(`✅ ${platform} is connected again.`);
+    }
+  }
+
+  private downNotice(link: ImLink): string {
+    const next = link.retryAt ? ` Next try in ${duration(link.retryAt - Date.now())}.` : '';
+    return `⚠️ ${link.platform} is not connected: ${link.error}.${next} Its conversations wait until it is back; a changed credential takes effect when the bridge restarts.`;
+  }
+
+  /**
+   * DM every owner once, on the first connected IM where they have a direct message with the bot. Undelivered,
+   * the text is logged as a failure (the state stays visible in `status` either way).
+   */
+  private tellOwners(text: string): void {
+    this.track(this.dmOwners(text).catch((err) => this.warn(`owners not told "${text}": ${(err as Error)?.message ?? err}`)));
+  }
+
+  private async dmOwners(text: string): Promise<void> {
+    let told = 0;
+    for (const person of Object.values(this.cfg.people)) {
+      if (person.trust !== 'owner') continue;
+      for (const [platform, link] of this.ims) {
+        const userId = link.state === 'connected' ? personIdOn(person, platform) : undefined;
+        if (userId === undefined) continue;
+        const dm = await this.store.getSession(dmKey(platform, userId));
+        if (!dm) continue;
+        try {
+          await this.send({ platform, channelId: dm.channel_id, threadId: dm.thread_id, isDM: true }, text);
+          told++;
+          break;
+        } catch (err) {
+          this.warn(`message to an owner on ${platform} not delivered: ${(err as Error)?.message ?? err}`);
+        }
+      }
+    }
+    if (!told) this.warn(`no owner could be told (none has a direct message with the bot on a connected IM): ${text}`);
+  }
+
+  /** The adapter for `platform` (undefined when the bridge has none); throws while that IM is not connected. */
+  private im(platform: string): ImAdapter | undefined {
+    const link = this.ims.get(platform);
+    if (link && link.state !== 'connected') throw new Error(`${platform} is not connected${link.error ? `: ${link.error}` : ''}`);
+    return link?.im;
   }
 
   /**
@@ -363,7 +478,7 @@ export class Bridge implements HubBackend {
     adapter.stop?.().catch((err) => this.warn(`stopping replaced agent ${adapter.name} failed: ${(err as Error).message}`));
   }
 
-  /** Wait until every queued turn has finished (tests, graceful shutdown). */
+  /** Wait until every queued turn has finished (tests, graceful shutdown), including turns waiting for a down IM. */
   async idle() {
     while (this.chains.size || this.inflight.size) {
       await Promise.allSettled([...this.inflight, ...this.chains.values()]);
@@ -418,7 +533,7 @@ export class Bridge implements HubBackend {
     const workspace = command ? this.agent(match.agent).workspace : undefined;
     if (command && workspace) {
       this.trace(key, 'command', senderId, { command });
-      this.schedule(key, () => this.runCommand(command, workspace, key, thread, senderId));
+      this.schedule(key, thread.platform, () => this.runCommand(command, workspace, key, thread, senderId));
       return;
     }
 
@@ -427,7 +542,7 @@ export class Bridge implements HubBackend {
     this.trace(key, 'inbound', senderId, { route: match.index, agent: match.agent, text: match.text });
     // The message takes its place in the thread's queue now; attachments download when its turn comes, so a
     // big file never lets a later message overtake it.
-    this.schedule(key, async () => {
+    this.schedule(key, thread.platform, async () => {
       const envelope = newEnvelope({
         sender: { kind: 'person', id: senderId, platform: msg.platform, platformUserId: msg.userId, displayName: msg.userName },
         sessionKey: key,
@@ -501,11 +616,12 @@ export class Bridge implements HubBackend {
   }
 
   /**
-   * Queue work behind everything else for this conversation. The chain never rejects: a failing step is
-   * logged and the next one still runs.
+   * Queue work behind everything else for this conversation; with `platform`, it also waits for that IM to be
+   * connected. The chain never rejects: a failing step is logged and the next one still runs.
    */
-  private schedule(key: string, fn: () => Promise<void>) {
-    const prev = this.chains.get(key) ?? this.ready.promise;
+  private schedule(key: string, platform: string | undefined, fn: () => Promise<void>) {
+    // Nothing that answers in an IM runs before that IM is connected (or the bridge stops).
+    const prev = this.chains.get(key) ?? (platform === undefined ? undefined : this.ims.get(platform)?.ready.promise) ?? Promise.resolve();
     const next = prev
       .then(fn)
       .catch((err) => this.warn(`error in ${key}: ${(err as Error)?.stack ?? err}`))
@@ -521,7 +637,7 @@ export class Bridge implements HubBackend {
       const job = JSON.parse(row.payload) as Job;
       if (row.status === 'pending') {
         this.log(`running queued message ${row.id} for ${job.agent}`);
-        this.schedule(job.sessionKey, () => this.runJob(job));
+        this.schedule(job.sessionKey, job.thread.platform, () => this.runJob(job));
         continue;
       }
       const interrupted = (job.interrupted ?? 0) + 1;
@@ -530,7 +646,7 @@ export class Bridge implements HubBackend {
       // is still given up after MAX_RESUMES.
       await this.store.markRunning(row.id, resumed);
       this.log(`resuming interrupted turn ${row.id} for ${job.agent} (attempt ${interrupted})`);
-      this.schedule(job.sessionKey, async () => {
+      this.schedule(job.sessionKey, job.thread.platform, async () => {
         if (interrupted > MAX_RESUMES) {
           await this.store.finish(row.id, 'failed');
           await this.notify(job.thread, `⚠️ ${job.agent}'s turn was interrupted ${interrupted} times by bridge restarts, so I stopped retrying. Send the request again to restart it.`);
@@ -560,7 +676,7 @@ export class Bridge implements HubBackend {
     const agentSessionId = await this.store.agentSession(sessionKey, agent);
 
     const progress = this.cfg.defaults.progress;
-    const im = this.ims.get(thread.platform);
+    const im = this.im(thread.platform);
     const edit = im?.edit?.bind(im);
     let placeholder: string | undefined;
     // collapsed: the placeholder shows the latest step. verbose: it lists the last steps.
@@ -1057,7 +1173,7 @@ export class Bridge implements HubBackend {
     const expires = rule.timeoutMs < 60e3 ? `${Math.round(rule.timeoutMs / 1e3)}s` : `${Math.round(rule.timeoutMs / 60e3)}m`;
     const header = `🔐 ${ctx.agent} wants to ${action.header}:`;
     const footer = `${approvers.join(', ')} can decide (expires in ${expires}).`;
-    const im = this.ims.get(ctx.thread.platform);
+    const im = this.im(ctx.thread.platform);
     // Buttons go in one message, so long arguments are cut there; typed approvals are split like any reply.
     const room = im?.sendChoice ? im.maxTextLength - header.length - footer.length - 120 : Infinity;
     const decision = await this.choose({
@@ -1161,6 +1277,7 @@ export class Bridge implements HubBackend {
     return {
       startedAt: this.startedAt,
       ims: [...this.ims.keys()],
+      connections: [...this.ims.values()].map(({ platform, state, since, error, retryAt }): ImConnection => ({ platform, state, since, error, retryAt })),
       agents: Object.keys(this.cfg.agents),
       tools: Object.keys(this.cfg.tools),
       activeTurns: [...this.active.values()].map((c) => ({ session: c.sessionKey, agent: c.agent })),
@@ -1264,7 +1381,8 @@ export class Bridge implements HubBackend {
     const by = `${opts.person} (${opts.via})`;
     const thread: ThreadRef = { platform: session.platform, channelId: session.channel_id, threadId: session.thread_id, isDM: isDmKey(key) };
     const done = Promise.withResolvers<string>();
-    this.schedule(key, async () => {
+    // A merge needs no IM: it runs even while the conversation's IM is down (only the note there is lost).
+    this.schedule(key, undefined, async () => {
       try {
         if (this.stopping) throw new Error('the bridge is shutting down');
         if (action === 'merge') {
@@ -1333,7 +1451,8 @@ export class Bridge implements HubBackend {
     for (const id of opts.people) {
       const person = Object.hasOwn(this.cfg.people, id) ? this.cfg.people[id] : undefined;
       if (!person) continue;
-      for (const platform of this.ims.keys()) {
+      for (const [platform, link] of this.ims) {
+        if (link.state !== 'connected') continue;
         const userId = personIdOn(person, platform);
         if (userId === undefined) continue;
         const key = dmKey(platform, userId);
@@ -1409,7 +1528,7 @@ export class Bridge implements HubBackend {
     /** Leave it out of `pendingChoices`. */
     unlisted?: boolean;
   }): Promise<{ by: string; value: string } | undefined> {
-    const im = this.ims.get(opts.thread.platform);
+    const im = this.im(opts.thread.platform);
     const id = randomUUID().slice(0, 8);
     const allowed = new Set(opts.allowed);
     const decided = Promise.withResolvers<{ by: string; value: string } | undefined>();
@@ -1483,7 +1602,7 @@ export class Bridge implements HubBackend {
   /** A button click: settle the choice if the clicker may decide. */
   async handleAction(action: InboundAction) {
     const [id, value] = action.value.split('|');
-    const im = this.ims.get(action.platform);
+    const im = this.im(action.platform);
     const choice = id ? this.choices.get(id) : undefined;
     if (!choice || value === undefined) {
       await im?.notifyUser?.(action.channelId, action.userId, 'This choice has already been decided or has expired.');
@@ -1558,7 +1677,7 @@ export class Bridge implements HubBackend {
   }
 
   private async send(thread: ThreadRef, text: string): Promise<string | undefined> {
-    const im = this.ims.get(thread.platform);
+    const im = this.im(thread.platform);
     if (!im) return undefined;
     let last: string | undefined;
     for (const chunk of split(text, im.maxTextLength)) {
@@ -1578,7 +1697,7 @@ export class Bridge implements HubBackend {
 
   /** Final reply: replace the progress placeholder when the IM can edit, otherwise post fresh. */
   private async post(thread: ThreadRef, text: string, placeholder?: string) {
-    const im = this.ims.get(thread.platform);
+    const im = this.im(thread.platform);
     if (!im) return;
     const chunks = split(text, im.maxTextLength);
     let start = 0;
@@ -1643,4 +1762,9 @@ class BudgetRefusal extends Error {
     super(message);
     this.detail = detail;
   }
+}
+
+/** 90000 → "2 min", 30000 → "30 s". */
+function duration(ms: number): string {
+  return ms >= 60e3 ? `${Math.round(ms / 60e3)} min` : `${Math.max(1, Math.round(ms / 1e3))} s`;
 }

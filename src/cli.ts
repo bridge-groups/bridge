@@ -11,7 +11,7 @@ import { configChanges, describeChanges, type ConfigChange } from './config/chan
 import { AppliedConfig, askOwners, ConfigGate, configSha, UNREADABLE_RECORD } from './config/gate.ts';
 import { configJsonSchema } from './config/json-schema.ts';
 import type { BridgeConfig } from './config/schema.ts';
-import { Bridge } from './core/bridge.ts';
+import { Bridge, type ImConnection } from './core/bridge.ts';
 import { Router } from './core/router.ts';
 import { SqliteStore } from './core/store.ts';
 import { Redactor } from './core/redact.ts';
@@ -19,6 +19,7 @@ import { envRefs, type SecretResolver } from './core/secrets.ts';
 import { localAgents } from './adapters/agent/local.ts';
 import { A2aAgent } from './adapters/agent/a2a.ts';
 import { keychainStorage } from './keychain-oauth.ts';
+import { FailedIm } from './adapters/im/failed.ts';
 import { LocalConsoleAdapter } from './adapters/im/local.ts';
 import { SlackAdapter } from './adapters/im/slack.ts';
 import { TelegramAdapter } from './adapters/im/telegram.ts';
@@ -353,20 +354,23 @@ async function run(configPath: string, ims: (cfg: BridgeConfig, secrets: SecretR
 
 function buildIms(cfg: BridgeConfig, dataDir: string, resolveSecret: SecretResolver): ImAdapter[] {
   const ims: ImAdapter[] = [];
-  if (cfg.im.slack) {
-    ims.push(new SlackAdapter({ appToken: resolveSecret(cfg.im.slack.app_token), botToken: resolveSecret(cfg.im.slack.bot_token) }));
+  // An IM whose credentials can't be read is reported as down, like one whose credentials are refused.
+  const add = (platform: string, build: () => ImAdapter) => {
+    try {
+      ims.push(build());
+    } catch (err) {
+      ims.push(new FailedIm(platform, (err as Error).message));
+    }
+  };
+  const { slack, telegram, feishu, discord } = cfg.im;
+  if (slack) add('slack', () => new SlackAdapter({ appToken: resolveSecret(slack.app_token), botToken: resolveSecret(slack.bot_token) }));
+  if (telegram) {
+    add('telegram', () => new TelegramAdapter({ botToken: resolveSecret(telegram.bot_token), stateFile: join(dataDir, 'telegram.json') }));
   }
-  if (cfg.im.telegram) {
-    ims.push(new TelegramAdapter({ botToken: resolveSecret(cfg.im.telegram.bot_token), stateFile: join(dataDir, 'telegram.json') }));
+  if (feishu) {
+    add('feishu', () => new FeishuAdapter({ appId: feishu.app_id, appSecret: resolveSecret(feishu.app_secret), domain: feishu.domain }));
   }
-  if (cfg.im.feishu) {
-    ims.push(
-      new FeishuAdapter({ appId: cfg.im.feishu.app_id, appSecret: resolveSecret(cfg.im.feishu.app_secret), domain: cfg.im.feishu.domain }),
-    );
-  }
-  if (cfg.im.discord) {
-    ims.push(new DiscordAdapter({ botToken: resolveSecret(cfg.im.discord.bot_token), messageContent: cfg.im.discord.message_content }));
-  }
+  if (discord) add('discord', () => new DiscordAdapter({ botToken: resolveSecret(discord.bot_token), messageContent: discord.message_content }));
   if (!ims.length) fail('no IM configured under im: — add one, or try "bridge chat --as <person>"');
   return ims;
 }
@@ -394,6 +398,20 @@ async function doctor(configPath: string) {
       if (typeof ref !== 'string') continue; // switches such as discord.message_content
       await check(`${im}.${field}`, () => void keychainSecrets(ref));
     }
+  }
+  // Whether each IM's credentials actually work shows in the running bridge's connections.
+  const live = await fetch(`${localBaseUrl(c.server)}/api/status`, { signal: AbortSignal.timeout(1500) })
+    .then(async (res) => (res.ok ? ((await res.json()) as { connections?: ImConnection[] }).connections : undefined))
+    .catch(() => undefined);
+  if (!live) console.log('· IM connections not checked: the bridge is not running');
+  for (const conn of live ?? []) {
+    await check(`${conn.platform} connection`, () => {
+      const since = new Date(conn.since).toLocaleString();
+      if (conn.state === 'connected') return `connected since ${since}`;
+      if (conn.state === 'connecting') throw new Error(`still connecting (since ${since})`);
+      const next = conn.retryAt ? `; next try ${new Date(conn.retryAt).toLocaleTimeString()}` : '';
+      throw new Error(`down since ${since}: ${conn.error ?? 'no reason given'}${next} (after fixing a credential: bridge service restart)`);
+    });
   }
   for (const [name, a] of Object.entries(c.agents)) {
     if (a.type === 'claude-code' || a.type === 'codex') {

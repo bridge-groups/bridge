@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FeishuAdapter, card } from '../adapters/im/feishu.ts';
+import { FeishuAdapter, card, sdkLogger } from '../adapters/im/feishu.ts';
 import { toFeishuMarkdown } from '../adapters/im/feishu-format.ts';
 
 function adapter() {
@@ -102,4 +102,14 @@ test('mentions: @_user_1 never corrupts @_user_10…; post `at` elements carry t
   );
   assert.equal(post.text, 'ask @Bob');
   assert.equal(post.mentioned, true);
+});
+
+test('the SDK\'s log of a failed token request carries the message, never the request body with the app secret', (t) => {
+  const lines: string[] = [];
+  t.mock.method(console, 'error', (l: string) => lines.push(l));
+  const err = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:9'), {
+    config: { data: '{"app_id":"cli_test","app_secret":"the-app-secret"}' },
+  });
+  sdkLogger.error([err, { config: { data: 'the-app-secret' } }, 'token', 3]);
+  assert.deepEqual(lines, ['feishu: connect ECONNREFUSED 127.0.0.1:9 [object] token 3']);
 });

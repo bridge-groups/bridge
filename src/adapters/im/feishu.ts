@@ -20,7 +20,7 @@ export class FeishuAdapter implements ImAdapter {
 
   constructor(opts: { appId: string; appSecret: string; domain?: 'feishu' | 'lark' }) {
     const domain = opts.domain === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu;
-    const base = { appId: opts.appId, appSecret: opts.appSecret, domain, loggerLevel: lark.LoggerLevel.warn };
+    const base = { appId: opts.appId, appSecret: opts.appSecret, domain, loggerLevel: lark.LoggerLevel.warn, logger: sdkLogger };
     this.client = new lark.Client(base);
     this.ws = new lark.WSClient(base);
   }
@@ -188,6 +188,23 @@ export class FeishuAdapter implements ImAdapter {
 }
 
 /** A card with one markdown block, plus optional buttons or an outcome note. */
+/**
+ * The SDK logs a failed request as the whole error, request body included, and the token request's body holds the
+ * app secret. Only messages reach the log: an error's message, plain values as they are, anything else by its type.
+ */
+export const sdkLogger = (() => {
+  const line = (msg: unknown[]) =>
+    `feishu: ${msg.flat().map((m) => (m instanceof Error ? m.message : m === null || typeof m !== 'object' ? String(m) : `[${typeof m}]`)).join(' ')}`;
+  const quiet = () => {};
+  return {
+    error: (...msg: unknown[]) => console.error(line(msg)),
+    warn: (...msg: unknown[]) => console.error(line(msg)),
+    info: (...msg: unknown[]) => console.log(line(msg)),
+    debug: quiet,
+    trace: quiet,
+  };
+})();
+
 export function card(text: string, opts: { choices?: Choice[]; note?: string } = {}) {
   const elements: object[] = [{ tag: 'markdown', content: toFeishuMarkdown(text) }];
   if (opts.choices?.length) {

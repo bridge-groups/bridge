@@ -62,6 +62,11 @@ await bridge.start();
 - **Config changes.** `bridge.reload(cfg)` applies a new config without dropping IM connections. To hold back
   changes that widen access, as the CLI does, compare with `configChanges(running, next)`: entries with `widens`
   need someone's confirmation. `bridge.askInDms` asks people in their DMs with the bot, with buttons.
+- **IMs that fail.** `start()` resolves even when an IM's `start` rejects: that IM is reported as `down` in
+  `status().connections` (with the reason, secrets redacted), the config's owners get a DM on an IM that works, and
+  it is tried again with backoff (`imRetry`, default 1 min doubling to 30 min) by calling `start` again. Its
+  conversations wait until it connects. An `ImAdapter` whose `start` rejects must hold no connection and accept
+  another `start` with the same callbacks.
 - **Log.** `log(line, level)` receives what the bridge reports; `error` marks failures someone should look at
   (default: the console).
 
@@ -71,7 +76,7 @@ These methods are what the CLI's dashboard is built on:
 
 | Method | Gives |
 | --- | --- |
-| `status()` | IMs, agents, tools, running turns |
+| `status()` | IMs and the state of each connection (`connections`: connecting, connected or down, with why), agents, tools, running turns |
 | `sessions()` | conversations with agent, cost, activity, and branch status where the agent keeps branches |
 | `auditTrail({ sessionKey?, limit })` | the audit trail, newest first, secrets redacted |
 | `pendingChoices()` / `decide(id, value, person, via)` | approvals and confirmations waiting, and deciding one as a person from `people` |

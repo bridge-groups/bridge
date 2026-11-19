@@ -52,7 +52,7 @@ policies:
 
 ```bash
 bridge secret set slack_app_token   # macOS keychain; elsewhere export BRIDGE_SECRET_SLACK_APP_TOKEN
-bridge doctor                       # config, secrets, agents and tool servers
+bridge doctor                       # config, secrets, agents and tool servers (and IM connections, when running)
 bridge up
 ```
 
@@ -77,6 +77,16 @@ widening, and the `tests` a file can carry are in [doc/config.md](doc/config.md)
 
 An agent whose settings changed gets a new process for its next turn; turns already running finish on the old one.
 Changing IM credentials needs a restart.
+
+### When an IM can't connect
+
+One IM failing to connect (a refused app secret, no network yet) doesn't stop the others: the bridge keeps running
+and tries that IM again after 1 minute, then at doubling intervals up to every 30 minutes. Its conversations,
+including work queued from the last run, wait until it is back (still within `offline_queue_ttl`). You see why it is
+down, without the secret, in `bridge status`, `bridge doctor`, on the dashboard, and in a DM on an IM that works
+(once per outage, and again when it is back; owners only, if they have a DM with the bot). Retries reuse the
+credential read at start, so after fixing a secret run `bridge service restart`. If every IM is down, the bridge
+still runs, so the dashboard can tell you why.
 
 ## IM
 
@@ -188,6 +198,7 @@ Housekeeping runs a minute after start and then every 6 hours. It deletes:
 
 `bridge dashboard` opens `http://127.0.0.1:7377/`, served by the running bridge to this machine only:
 
+- **IM not connected**: an IM that failed to connect, why, and when it is tried next.
 - **Waiting for you**: pending approvals, confirmations and config changes. You decide as the config's first owner.
 - **Conversations**: each with its agent, cost, activity and branch; merge or discard a branch (it shows what will
   happen first, waits for any running turn, and posts the result to the thread).

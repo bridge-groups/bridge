@@ -42,6 +42,8 @@ section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em
 section > h2 .count { background: var(--bg); border-radius: 999px; padding: 0 7px; font-size: 11px; }
 #approvals { border-color: var(--warn); }
 #approvals > h2 { color: var(--warn); background: var(--warn-soft); }
+#ims-down { border-color: var(--danger); }
+#ims-down > h2 { color: var(--danger); background: var(--danger-soft); }
 .empty { padding: 18px 14px; color: var(--muted); }
 .row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .row:last-child { border-bottom: 0; }
@@ -105,6 +107,7 @@ button:disabled { opacity: .5; cursor: default; }
 </header>
 <main>
   <div>
+    <section id="ims-down" hidden><h2>IM not connected <span class="count" id="ims-down-count"></span></h2><div id="ims-down-list"></div></section>
     <section id="approvals" hidden><h2>Waiting for you <span class="count" id="approvals-count"></span></h2><div id="approvals-list"></div></section>
     <section><h2>Conversations <span class="count" id="sessions-count"></span></h2><div id="sessions"></div></section>
     <section><h2>Tool servers <span class="spacer"></span><button id="tools-refresh">Check</button></h2><div id="tools"><div class="empty">Checking…</div></div></section>
@@ -184,8 +187,25 @@ button:disabled { opacity: .5; cursor: default; }
     var conn = $('conn');
     clear(conn).appendChild(el('span', { class: 'dot' }));
     conn.appendChild(el('span', { text: 'running' }));
-    $('ims').textContent = (s.ims.length ? s.ims.map(function (i) { return PLATFORM[i] || i; }).join(' · ') : 'no IM') +
-      ' · ' + s.agents.length + ' agent' + (s.agents.length === 1 ? '' : 's');
+    var conns = s.connections || [];
+    $('ims').textContent = (conns.length ? conns.map(function (c) {
+      return (PLATFORM[c.platform] || c.platform) + (c.state === 'connected' ? '' : c.state === 'down' ? ' ✗' : ' …');
+    }).join(' · ') : 'no IM') + ' · ' + s.agents.length + ' agent' + (s.agents.length === 1 ? '' : 's');
+    // An IM that failed to connect: why, since when, and when it is tried again (the others keep working).
+    var down = conns.filter(function (c) { return c.state === 'down'; });
+    $('ims-down').hidden = !down.length;
+    $('ims-down-count').textContent = down.length;
+    var box = clear($('ims-down-list'));
+    down.forEach(function (c) {
+      box.appendChild(el('div', { class: 'row' }, [
+        el('div', { class: 'main' }, [
+          el('div', { class: 'sub', text: (PLATFORM[c.platform] || c.platform) + ' · down since ' + ago(c.since) +
+            (c.retryAt ? ' · next try ' + clock(c.retryAt) : '') }),
+          el('div', { class: 'prompt', text: c.error || 'no reason given' }),
+          el('div', { class: 'sub', text: 'Conversations on it wait until it is back. After fixing a credential, restart the bridge (bridge service restart).' }),
+        ]),
+      ]));
+    });
     $('uptime').textContent = s.startedAt ? 'up ' + ago(s.startedAt).replace(' ago', '') : 'starting';
     $('updated').textContent = 'updated ' + clock(Date.now());
   }

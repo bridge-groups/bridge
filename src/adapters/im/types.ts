@@ -27,6 +27,10 @@ export interface InboundAction {
 /** An IM connection. Every adapter connects outbound (socket / long-poll), so no public URL is needed. */
 export interface ImAdapter {
   readonly platform: string;
+  /**
+   * Connect. When it rejects (a refused credential, no network) the adapter holds no connection, and the bridge
+   * calls `start` again later with the same callbacks.
+   */
   start(onMessage: (msg: InboundMessage) => void, onAction?: (action: InboundAction) => void): Promise<void>;
   stop(): Promise<void>;
   /** Returns the platform message id. */

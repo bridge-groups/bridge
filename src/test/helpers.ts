@@ -45,10 +45,22 @@ export class FakeIm implements ImAdapter {
   private listeners: Array<(m: OutboundMessage) => void> = [];
   private choiceListeners: Array<(id: string) => void> = [];
 
+  /** Calls to start and stop, failed ones included. */
+  starts = 0;
+  stops = 0;
+  private failing?: { message: string; times: number };
+
   constructor(platform = 'slack') {
     this.platform = platform;
   }
+  /** Make the next `times` starts reject with `message`, like a refused credential or a missing network. */
+  failStart(message: string, times = Infinity) {
+    this.failing = { message, times };
+    return this;
+  }
   async start(cb: (m: InboundMessage) => void, onAction?: (a: InboundAction) => void) {
+    this.starts++;
+    if (this.failing && this.failing.times-- > 0) throw new Error(this.failing.message);
     this.onMessage = cb;
     this.onAction = onAction;
   }
@@ -74,7 +86,9 @@ export class FakeIm implements ImAdapter {
     const c = this.choiceMessages.get(id)!.choices.find((x) => x.label === label)!;
     this.onAction!({ platform: this.platform, channelId: 'C1', userId, messageId: id, value: c.value });
   }
-  async stop() {}
+  async stop() {
+    this.stops++;
+  }
   async send(m: OutboundMessage) {
     this.sent.push(m);
     for (const l of this.listeners) l(m);
