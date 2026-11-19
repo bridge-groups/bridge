@@ -1,7 +1,7 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { personIdOn, type BridgeConfig, type TrustLevel } from '../config/schema.ts';
 import { remoteAgents, type AgentFactory } from '../adapters/agent/index.ts';
-import type { AgentAdapter, AgentReply, Workspace } from '../adapters/agent/types.ts';
+import { ShuttingDown, type AgentAdapter, type AgentReply, type Workspace } from '../adapters/agent/types.ts';
 import type { Choice, ImAdapter, InboundAction } from '../adapters/im/types.ts';
 import { randomUUID } from 'node:crypto';
 import { McpHub, type HubBackend, type SessionGrant, type ToolResult } from '../mcp/hub.ts';
@@ -319,7 +319,7 @@ export class Bridge implements HubBackend {
     clearInterval(this.housekeeping);
     clearTimeout(this.firstCleanUp);
     this.ready.resolve();
-    for (const ctx of this.active.values()) ctx.controller.abort();
+    for (const ctx of this.active.values()) ctx.controller.abort(new ShuttingDown());
     for (const list of [...this.waiters.values()]) for (const w of [...list]) w.cancel('the bridge is shutting down');
     for (const a of new Set([...this.agents.values(), ...this.retiring])) {
       await a.stop?.().catch((err) => this.warn(`stopping agent ${a.name} failed: ${(err as Error).message}`));
@@ -609,14 +609,15 @@ export class Bridge implements HubBackend {
       // Resuming a cut-off turn: the agent session already holds the request and any partial work.
       // Resuming after other agents' turns: the agent session doesn't know them.
       const catchUp = agentSessionId && !job.interrupted ? await this.catchUp(sessionKey, agent) : undefined;
+      const resume = Boolean(job.interrupted && agentSessionId);
       const text =
-        job.interrupted && agentSessionId
+        resume
           ? `[bridge] Your previous turn was interrupted because the bridge restarted. Check what you had already done, then finish the original request:\n\n${job.text}`
           : catchUp
             ? `${catchUp}\n\n[bridge] The new message:\n\n${job.text}`
             : job.text;
       const ctx = { sessionKey, rootKey: sessionKey, agent, envelope: job.envelope, thread };
-      const reply = await this.invoke(ctx, text, agentSessionId, { onProgress });
+      const reply = await this.invoke(ctx, text, agentSessionId, { onProgress, resume });
       outcome = { ok: true, text: reply.text || '(no reply)' };
     } catch (err) {
       // A refused turn is an answer, not a failure: it is already in the audit trail as `budget`.
@@ -678,7 +679,13 @@ export class Bridge implements HubBackend {
     turn: Omit<TurnCtx, 'controller'>,
     text: string,
     agentSessionId: string | undefined,
-    opts: { onProgress?: (l: string) => void; /** A delegated turn ends with the turn that delegated it. */ parent?: AbortSignal } = {},
+    opts: {
+      onProgress?: (l: string) => void;
+      /** A delegated turn ends with the turn that delegated it. */
+      parent?: AbortSignal;
+      /** The turn was cut off by a restart and runs again. */
+      resume?: boolean;
+    } = {},
   ): Promise<AgentReply> {
     const adapter = this.agent(turn.agent);
     const ctx: TurnCtx = { ...turn, controller: new AbortController() };
@@ -701,6 +708,7 @@ export class Bridge implements HubBackend {
         envelope: ctx.envelope,
         text,
         agentSessionId,
+        resume: opts.resume,
         budgetUsd,
         files: ctx.envelope.content.flatMap((b) =>
           b.type === 'file' && b.path ? [{ name: b.name, path: b.path, mime: b.mime }] : [],
@@ -710,6 +718,8 @@ export class Bridge implements HubBackend {
         onSessionId: (id) => this.later(() => this.store.updateSession(ctx.sessionKey, { agentSession: { agent: ctx.agent, id } })),
         onNotice: (note) => void this.notify(ctx.thread, note),
       });
+      // Session ids reported during the turn are queued writes: they land first, so the final one wins.
+      await this.flushWrites();
       await this.store.updateSession(ctx.sessionKey, { agentSession: { agent: ctx.agent, id: reply.agentSessionId ?? null } });
       if (reply.costUsd) await this.store.updateSession(ctx.rootKey, { addSpentUsd: reply.costUsd });
       this.trace(ctx.sessionKey, 'reply', ctx.agent, { text: reply.text, costUsd: reply.costUsd });

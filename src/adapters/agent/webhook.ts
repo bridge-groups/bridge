@@ -70,7 +70,7 @@ export class WebhookAgent implements AgentAdapter {
 }
 
 /** The `data` of each server-sent event (multi-line data joined with "\n"); comments and other fields are skipped. */
-async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+export async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const decoder = new TextDecoder();
   let buffer = '';
   let data: string[] = [];

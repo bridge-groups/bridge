@@ -1,7 +1,8 @@
 # Writing an agent
 
 An agent is anything that takes a turn (a message and its context) and returns a reply. Claude Code and Codex are
-built in; any other agent is a **webhook** (an HTTP service) or a **stdio** process (a long-running local program).
+built in; any other agent is a **webhook** (an HTTP service), a **stdio** process (a long-running local program), or
+an **A2A** agent (a remote service speaking the Agent2Agent protocol, below).
 
 ## What every turn gets
 
@@ -47,3 +48,33 @@ lines carrying the same `id`, and may work on several turns at once. When a turn
 the agent's `timeout` (default `30m`), the bridge writes `{"type":"cancel","id"}` and ignores anything that comes
 back for that id. Lines that aren't JSON are ignored, and stderr goes to the bridge's log. See
 [src/examples/echo-agent.mjs](../src/examples/echo-agent.mjs).
+
+## A2A agents
+
+`type: a2a` reaches an agent that speaks [A2A](https://a2a-protocol.org) 1.0 or 0.3 over JSON-RPC
+([a2a.ts](../src/adapters/agent/a2a.ts)). It speaks A2A instead of the messages above, so it gets no MCP endpoint:
+it can't call `send_message`, `ask_human`, `delegate` or tool servers, but routes and other agents' `delegate` reach
+it like any agent.
+
+- **Agent card.** `url` is the card's URL, or the URL it lives under (`/.well-known/agent-card.json` is added unless
+  `url` ends in `.json`). The bridge reads the card on the agent's first turn and again after a failed turn, and
+  takes its JSON-RPC interface, preferring 1.0 over 0.3, and `capabilities.streaming`. An interface on another
+  origin than the card is refused, and redirects are not followed, so `headers` only go to the host in
+  `bridge.yaml`. The card's name, description and skills are never shown to agents. `bridge doctor` reads the card
+  and shows the version and endpoint it found.
+- **Credentials** are `headers` sent with every request, the card's included: `Authorization: "Bearer
+  ${secret:name}"`, `X-API-Key: secret:name`, or `env:` references.
+- **Conversations.** A conversation is one A2A context: each turn sends one message (the text and every attachment
+  inline) with the conversation's `contextId`, and waits for its task. A streaming agent's status messages show as
+  progress; otherwise the bridge asks for the task at once and polls it (`GetTask` after 0.5s, doubling to every
+  10s).
+- **Replies.** A completed task answers with its artifacts (text, data as JSON, files named with their URL), or its
+  status message when it has none; an agent may also answer with a message and no task. A task that needs input
+  (`input-required`, `auth-required`) answers with its question, and the conversation's next message goes to the
+  same task. A failed, rejected or canceled task fails the turn with its status message.
+- **Stopping.** A turn that is stopped, or has no answer within `timeout` (default `30m`), cancels its task
+  (`CancelTask`). One cut off by a bridge shutdown leaves its task running: after the restart the turn rejoins it
+  (`GetTask`, then `SubscribeToTask` or polling) instead of sending the request again. A task the agent no longer
+  knows is asked for again. A delegated turn is not resumed, so a shutdown cancels its task.
+- The bridge keeps `{"contextId","taskId"?,"open"?}` as the agent's session id; a session id from another agent type
+  starts a new context. A2A reports no cost, so budgets don't limit A2A agents.

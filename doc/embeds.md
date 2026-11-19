@@ -46,7 +46,7 @@ await bridge.start();
   `mcpBaseUrl` the bridge listens on `cfg.server.host:port` itself; `extraRoutes` adds routes there.
 - **Secrets.** `secrets` resolves every `secret:` / `env:` reference the bridge meets (default: `envSecrets()`,
   the environment only). Every value it returns is redacted from that bridge's audit trail.
-- **Agents.** By default only remote agents (`webhook`) are built from the config. Pass
+- **Agents.** By default only remote agents (`webhook`, `a2a`) are built from the config. Pass
   `agentFactory: localAgents` from `/local` to run Claude Code, Codex and stdio agents on the host. A service running
   other people's bridges should not, or should run each bridge in its own sandbox. `agents` takes adapters you
   build yourself (any `AgentAdapter`).

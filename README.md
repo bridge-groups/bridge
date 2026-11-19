@@ -9,8 +9,8 @@ in an audit trail with secrets redacted.
   Discord (Gateway WebSocket) and Telegram (long polling) are written but not yet tested against the real services.
 - **Tools**: MCP servers, local or remote. The bridge holds the credentials and gives each agent only what its
   routes allow.
-- **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, or any local process speaking JSON
-  lines ([doc/agents.md](doc/agents.md)).
+- **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, remote agents speaking A2A, or any
+  local process speaking JSON lines ([doc/agents.md](doc/agents.md)).
 - **Deny by default**: a message reaches an agent only through a route, and every message, tool call and approval
   is recorded.
 
@@ -98,7 +98,7 @@ Progress shows in a placeholder message that is edited as the agent works (`defa
 `verbose` or `off`).
 
 Files and images sent with a message are downloaded to `/tmp/bridge/files/<conversation>/` (up to `max_file_mb`,
-default 20) and handed to the agent as local paths. Slack needs the `files:read` scope.
+default 20) and handed to the agent as local paths (A2A agents get their contents). Slack needs the `files:read` scope.
 
 ## Agents
 
@@ -110,6 +110,9 @@ default 20) and handed to the agent as local paths. Slack needs the `files:read`
   `~/.codex` login and config.
 - **webhook** and **stdio** agents speak the protocol in [doc/agents.md](doc/agents.md); see
   [src/examples/echo-agent.mjs](src/examples/echo-agent.mjs).
+- **a2a** reaches a remote agent speaking [A2A](https://a2a-protocol.org) 1.0 or 0.3: `url` points at its agent card,
+  `headers` carry its credentials, and each conversation is one A2A context. See
+  [doc/agents.md](doc/agents.md#a2a-agents).
 
 A `budget_usd` policy caps what a conversation may spend: each turn starts with only what is left (Claude Code gets
 it as `--max-budget-usd`), and a turn starts only when that covers the agent's cheapest recent turn. Codex reports
@@ -197,7 +200,7 @@ tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` sho
 ## Not in v0.1 yet
 
 - Discord and Telegram tested against the real services
-- A2A
+- An A2A server: bridge agents reachable by other A2A clients (the bridge is an A2A client today)
 - A spending limit per sender outside `people:` (today the budget is per conversation, so a new thread starts a
   fresh one)
 - A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP

@@ -17,6 +17,7 @@ import { SqliteStore } from './core/store.ts';
 import { Redactor } from './core/redact.ts';
 import { envRefs, type SecretResolver } from './core/secrets.ts';
 import { localAgents } from './adapters/agent/local.ts';
+import { A2aAgent } from './adapters/agent/a2a.ts';
 import { keychainStorage } from './keychain-oauth.ts';
 import { LocalConsoleAdapter } from './adapters/im/local.ts';
 import { SlackAdapter } from './adapters/im/slack.ts';
@@ -399,6 +400,11 @@ async function doctor(configPath: string) {
       await check(`agent ${name}`, () => execFileSync(a.command, ['--version'], { encoding: 'utf8' }).trim());
     } else if (a.type === 'stdio') {
       await check(`agent ${name}`, () => execFileSync('which', [a.command], { encoding: 'utf8' }).trim());
+    } else if (a.type === 'a2a') {
+      await check(`agent ${name}`, async () => {
+        const ep = await new A2aAgent(name, a, keychainSecrets).endpoint(AbortSignal.timeout(5000));
+        return `A2A ${ep.version} at ${ep.url}${ep.streaming ? ', streaming' : ''}`;
+      });
     } else {
       await check(`agent ${name}`, async () => {
         const res = await fetch(a.url, { method: 'OPTIONS', signal: AbortSignal.timeout(3000) }).catch((e) => {

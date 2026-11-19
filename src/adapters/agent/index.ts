@@ -1,6 +1,7 @@
 import type { AgentConfig } from '../../config/schema.ts';
 import type { SecretResolver } from '../../core/secrets.ts';
 import type { AgentAdapter } from './types.ts';
+import { A2aAgent } from './a2a.ts';
 import { WebhookAgent } from './webhook.ts';
 
 /** Builds the adapter for one agent of the config; the bridge calls it when the agent is first needed. */
@@ -16,5 +17,6 @@ export type AgentFactory = (
  */
 export const remoteAgents: AgentFactory = (name, cfg, { secrets }) => {
   if (cfg.type === 'webhook') return new WebhookAgent(name, cfg, secrets);
+  if (cfg.type === 'a2a') return new A2aAgent(name, cfg, secrets);
   throw new Error(`agent "${name}" (type ${cfg.type}) runs on this machine — enable local agents to use it`);
 };

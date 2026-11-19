@@ -113,7 +113,7 @@ src/                     all source code
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
   web/                   the CLI's dashboard (JSON API + one self-contained page), built on Bridge's public methods
   adapters/im/           Slack, Feishu / Lark, Telegram, local console (+ Markdown renderers)
-  adapters/agent/        webhook (remote); claude-code and codex (cli-agent.ts: worktrees, process groups) and stdio
+  adapters/agent/        webhook and a2a (remote); claude-code and codex (cli-agent.ts: worktrees, process groups) and stdio
                          (local, opt-in); protocol.ts is the webhook / stdio wire format
   examples/              example agents (shipped)
   test/                  node:test suites, helpers and fixtures (not shipped)

@@ -122,6 +122,20 @@ const WebhookAgent = z
   })
   .strict();
 
+/** A remote agent speaking A2A (Agent2Agent) 1.0 or 0.3 over JSON-RPC. */
+const A2aAgent = z
+  .object({
+    type: z.literal('a2a'),
+    /** The agent card's URL, or the base URL it lives under (/.well-known/agent-card.json is added). */
+    url: z.url({ protocol: /^https?$/ }),
+    /** Sent with every request, card included. Values may be "secret:x", "env:X" or contain ${secret:x} / ${env:X}. */
+    headers: z.record(z.string(), z.string()).default({}),
+    /** A turn whose task hasn't completed or asked for input after this long fails, and its task is canceled. */
+    timeout: TimerDuration.default('30m'),
+    description: z.string().optional(),
+  })
+  .strict();
+
 const StdioAgent = z
   .object({
     type: z.literal('stdio'),
@@ -135,7 +149,7 @@ const StdioAgent = z
   })
   .strict();
 
-export const AgentConfig = z.discriminatedUnion('type', [ClaudeCodeAgent, CodexAgent, WebhookAgent, StdioAgent]);
+export const AgentConfig = z.discriminatedUnion('type', [ClaudeCodeAgent, CodexAgent, WebhookAgent, A2aAgent, StdioAgent]);
 export type AgentConfig = z.infer<typeof AgentConfig>;
 
 /** An external tool server the bridge proxies: a local MCP process (stdio)… */

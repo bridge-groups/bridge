@@ -51,6 +51,7 @@ test('a turn cut off by a restart resumes the same agent session', async () => {
   const { turns, im } = await restart(store);
   assert.equal(turns.length, 1);
   assert.equal(turns[0]!.agentSessionId, 'claude-123');
+  assert.equal(turns[0]!.resume, true);
   assert.match(turns[0]!.text, /interrupted because the bridge restarted[\s\S]*fix the bug/);
   assert.match(im.transcript().join('\n'), /🔁 The bridge restarted[\s\S]*resumed ok/);
   assert.equal(store.takePending(60e3).length, 0);

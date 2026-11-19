@@ -137,6 +137,7 @@ test('changes: an agent or tool server is compared setting by setting', () => {
 agents:
   cc: { type: claude-code, permission_mode: acceptEdits, allowed_tools: ["Bash(git status:*)", "Bash(npm test:*)"], worktree: true }
   cx: { type: codex, sandbox: workspace-write }
+  peer: { type: a2a, url: "https://agents.example.com/peer", headers: { Authorization: "Bearer \${secret:peer}" } }
 tools:
   gh: { url: "https://example.com/mcp" }
 routes:
@@ -168,6 +169,10 @@ routes:
   // Anything that says where or what it runs widens, even next to an inert change.
   assert.deepEqual(change('type: codex, sandbox', 'type: codex, description: x, cwd: /tmp, sandbox'), { widens: true, fields: ['cwd', 'description'] });
   assert.equal(change('example.com/mcp', 'example.org/mcp').widens, true);
+  // An A2A agent: where it is and what credentials it gets widen; its description and timeout don't.
+  assert.deepEqual(change('peer", headers', 'peer", description: "finds papers", timeout: 1h, headers'), { widens: false, fields: ['description', 'timeout'] });
+  assert.equal(change('agents.example.com/peer', 'agents.example.org/peer').widens, true);
+  assert.equal(change('secret:peer}', 'secret:admin}').widens, true);
   // Changing the type replaces the agent's settings wholesale.
   assert.equal(change('cx: { type: codex, sandbox: workspace-write }', 'cx: { type: stdio, command: "true" }').widens, true);
 });

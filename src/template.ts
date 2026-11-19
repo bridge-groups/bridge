@@ -51,6 +51,11 @@ agents:
   # data-agent:
   #   type: webhook
   #   url: http://localhost:8080/agent
+  # researcher:              # a remote A2A agent: its agent card is read from this URL
+  #   type: a2a
+  #   url: https://agents.example.com/researcher
+  #   headers:
+  #     Authorization: "Bearer \${secret:researcher_token}"
 
 # External tools (MCP servers) the bridge connects to with its own credentials.
 tools: {}

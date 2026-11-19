@@ -9,6 +9,7 @@ im: { slack: { app_token: env:A, bot_token: env:B } }
 agents:
   cc: { type: claude-code }
   remote: { type: webhook, url: "http://localhost:1/x" }
+  peer: { type: a2a, url: "https://agents.example.com/peer" }
 `;
 
 test('valid config parses with defaults', () => {
@@ -24,6 +25,8 @@ test('local agent route from IM must name senders', () => {
   );
   // remote agents may take anyone; "anyone" is an explicit opt-out for local ones
   parseConfig(base + `routes:\n  - { from: "slack:#dev", to: remote }\n`);
+  parseConfig(base + `routes:\n  - { from: "slack:#dev", to: peer }\n`);
+  assert.throws(() => parseConfig(base.replace('https://agents', 'ftp://agents')), ConfigError, 'an A2A agent is reached over HTTP(S)');
   parseConfig(base + `routes:\n  - { from: "slack:#dev", when: { sender: anyone }, to: cc }\n`);
 });
 

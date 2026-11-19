@@ -22,7 +22,21 @@ export interface AgentTurn {
   onSessionId?: (id: string) => void;
   /** A one-off note for the conversation (e.g. "working on branch X"). */
   onNotice?: (text: string) => void;
+  /**
+   * The bridge restarted during this turn and runs it again; `text` asks the agent to finish the original
+   * request. An agent whose work goes on elsewhere may rejoin that work instead.
+   */
+  resume?: boolean;
+  /** Ends the turn; its reason is a ShuttingDown when the bridge is stopping and the turn resumes on the next start. */
   signal?: AbortSignal;
+}
+
+/** Why a turn ended when the bridge shuts down: it resumes on the next start, so work running elsewhere can go on. */
+export class ShuttingDown extends Error {
+  constructor() {
+    super('the bridge is shutting down');
+    this.name = 'ShuttingDown';
+  }
 }
 
 export interface AgentReply {

@@ -97,7 +97,7 @@ export function semanticCheck(cfg: BridgeConfig): ConfigIssue[] {
         issue([...where, 'from'], `IM "${from.platform}" is not configured under im:`);
       }
       // Agents running on this machine are only reachable by people named in the route.
-      if (agent.type !== 'webhook' && route.when.sender === undefined) {
+      if (agent.type !== 'webhook' && agent.type !== 'a2a' && route.when.sender === undefined) {
         issue(where, `"${target}" runs on this machine, so the route needs when.sender (list people, or "anyone" to opt out)`);
       }
       if (from.platform === 'discord' && route.when.mention === false && cfg.im.discord && !cfg.im.discord.message_content) {

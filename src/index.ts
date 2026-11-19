@@ -34,9 +34,10 @@ export { TelegramAdapter } from './adapters/im/telegram.ts';
 export { DiscordAdapter } from './adapters/im/discord.ts';
 
 // Agents reached over the network
-export type { AgentAdapter, AgentReply, AgentTurn, Workspace } from './adapters/agent/types.ts';
+export { ShuttingDown, type AgentAdapter, type AgentReply, type AgentTurn, type Workspace } from './adapters/agent/types.ts';
 export { remoteAgents, type AgentFactory } from './adapters/agent/index.ts';
 export { WebhookAgent } from './adapters/agent/webhook.ts';
+export { A2aAgent, type A2aEndpoint } from './adapters/agent/a2a.ts';
 
 // Tool servers and their OAuth sign-in
 export { ToolHub, type ToolHubOptions } from './mcp/tools.ts';
