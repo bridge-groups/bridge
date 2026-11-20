@@ -191,18 +191,21 @@ button:disabled { opacity: .5; cursor: default; }
     $('ims').textContent = (conns.length ? conns.map(function (c) {
       return (PLATFORM[c.platform] || c.platform) + (c.state === 'connected' ? '' : c.state === 'down' ? ' ✗' : ' …');
     }).join(' · ') : 'no IM') + ' · ' + s.agents.length + ' agent' + (s.agents.length === 1 ? '' : 's');
-    // An IM that failed to connect: why, since when, and when it is tried again (the others keep working).
-    var down = conns.filter(function (c) { return c.state === 'down'; });
+    // An IM that failed to connect (why, since when, next try) or lost its inbound connection (the others keep working).
+    var down = conns.filter(function (c) { return c.state === 'down' || c.state === 'reconnecting'; });
     $('ims-down').hidden = !down.length;
     $('ims-down-count').textContent = down.length;
     var box = clear($('ims-down-list'));
     down.forEach(function (c) {
       box.appendChild(el('div', { class: 'row' }, [
         el('div', { class: 'main' }, [
-          el('div', { class: 'sub', text: (PLATFORM[c.platform] || c.platform) + ' · down since ' + ago(c.since) +
+          el('div', { class: 'sub', text: (PLATFORM[c.platform] || c.platform) +
+            (c.state === 'reconnecting' ? ' · not receiving since ' : ' · down since ') + ago(c.since) +
             (c.retryAt ? ' · next try ' + clock(c.retryAt) : '') }),
           el('div', { class: 'prompt', text: c.error || 'no reason given' }),
-          el('div', { class: 'sub', text: 'Conversations on it wait until it is back. After fixing a credential, restart the bridge (bridge service restart).' }),
+          el('div', { class: 'sub', text: c.state === 'reconnecting'
+            ? 'Reconnecting on its own. Replies still go out; new messages arrive once it is back.'
+            : 'Conversations on it wait until it is back. After fixing a credential, restart the bridge (bridge service restart).' }),
         ]),
       ]));
     });

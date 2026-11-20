@@ -67,6 +67,10 @@ await bridge.start();
   it is tried again with backoff (`imRetry`, default 1 min doubling to 30 min) by calling `start` again. Its
   conversations wait until it connects. An `ImAdapter` whose `start` rejects must hold no connection and accept
   another `start` with the same callbacks.
+- **IMs that drop.** An adapter that sees its inbound connection drop after `start` reports it through `start`'s
+  third callback (`LinkChange`): the IM is `reconnecting` (sending still works, nothing is queued), the owners are
+  told once it has lasted `imQuietMs` (default 5 min) and when it is back, and whenever the adapter says messages
+  since some time may be lost (`missedSince`).
 - **Log.** `log(line, level)` receives what the bridge reports; `error` marks failures someone should look at
   (default: the console).
 
@@ -76,7 +80,7 @@ These methods are what the CLI's dashboard is built on:
 
 | Method | Gives |
 | --- | --- |
-| `status()` | IMs and the state of each connection (`connections`: connecting, connected or down, with why), agents, tools, running turns |
+| `status()` | IMs and the state of each connection (`connections`: connecting, connected, reconnecting or down, with why), agents, tools, running turns |
 | `sessions()` | conversations with agent, cost, activity, and branch status where the agent keeps branches |
 | `auditTrail({ sessionKey?, limit })` | the audit trail, newest first, secrets redacted |
 | `pendingChoices()` / `decide(id, value, person, via)` | approvals and confirmations waiting, and deciding one as a person from `people` |

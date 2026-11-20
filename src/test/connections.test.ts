@@ -42,6 +42,7 @@ function setup(opts: { slack?: FakeIm; feishu?: ImAdapter; store?: SqliteStore }
     agents: new Map([['echo', echo]]),
     redactor,
     imRetry: { firstMs: 20, maxMs: 40 },
+    imQuietMs: 50,
     log: (l) => logs.push(l),
   });
   return { slack, feishu, store, bridge, logs };
@@ -115,6 +116,49 @@ test('a down IM is retried with backoff; its queued work waits for it, and the o
     const c = await connection(bridge, 'feishu');
     assert.equal(c.error, undefined);
     assert.equal(c.retryAt, undefined);
+  } finally {
+    await bridge.stop();
+  }
+});
+
+test('an IM that stops receiving is reconnecting: replies still go out, the owner hears after a while and when it is back, and of lost messages', async () => {
+  const feishu = new FakeIm('feishu');
+  const { slack, bridge, logs } = setup({ feishu });
+  await bridge.start();
+  try {
+    const ownerDms = () => slack.sent.filter((m) => m.channelId === 'D1').map((m) => m.text);
+    feishu.link({ receiving: false, reason: `gateway heartbeat not acknowledged (${SECRET})` });
+    const quiet = await connection(bridge, 'feishu');
+    assert.equal(quiet.state, 'reconnecting');
+    assert.match(quiet.error!, /heartbeat not acknowledged \(\[redacted\]\)/);
+    // A later failure updates the reason but not when it started.
+    feishu.link({ receiving: false, reason: 'gateway no Hello within 30 s' });
+    assert.equal((await connection(bridge, 'feishu')).since, quiet.since);
+    assert.equal((await connection(bridge, 'feishu')).error, 'gateway no Hello within 30 s');
+
+    // Sending is not blocked: a reply still goes out on it.
+    feishu.receive({ userId: 'ou_1', text: 'still there?' });
+    await until(() => feishu.transcript().includes('echo: still there?'), 'the reply while reconnecting');
+
+    await until(() => ownerDms().length === 1, 'the owner told it went quiet');
+    assert.match(ownerDms()[0]!, /feishu has not received anything for .*no Hello within 30 s.*replies still go out/);
+
+    feishu.link({ receiving: true, missedSince: Date.now() - 3 * 60e3 });
+    const back = await connection(bridge, 'feishu');
+    assert.equal(back.state, 'connected');
+    assert.equal(back.error, undefined);
+    await until(() => ownerDms().length === 2, 'the all-clear');
+    assert.match(ownerDms()[1]!, /feishu is receiving messages again/);
+    assert.match(ownerDms()[1]!, /new session, so messages sent to the bot in the last 3 min may not have arrived/);
+    assert.ok(logs.some((l) => /may not have arrived/.test(l)), 'the loss is logged');
+
+    // A short drop that resumes: no DM at all.
+    feishu.link({ receiving: false, reason: 'connection closed (1006)' });
+    feishu.link({ receiving: true });
+    assert.equal((await connection(bridge, 'feishu')).state, 'connected');
+    await bridge.idle();
+    assert.equal(ownerDms().length, 2);
+    assert.ok(!logs.some((l) => l.includes(SECRET)));
   } finally {
     await bridge.stop();
   }

@@ -413,6 +413,7 @@ async function doctor(configPath: string) {
       const since = new Date(conn.since).toLocaleString();
       if (conn.state === 'connected') return `connected since ${since}`;
       if (conn.state === 'connecting') throw new Error(`still connecting (since ${since})`);
+      if (conn.state === 'reconnecting') throw new Error(`not receiving since ${since}: ${conn.error ?? 'no reason given'} (reconnecting; replies still go out)`);
       const next = conn.retryAt ? `; next try ${new Date(conn.retryAt).toLocaleTimeString()}` : '';
       throw new Error(`down since ${since}: ${conn.error ?? 'no reason given'}${next} (after fixing a credential: bridge service restart)`);
     });

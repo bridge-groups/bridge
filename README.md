@@ -88,6 +88,11 @@ down, without the secret, in `bridge status`, `bridge doctor`, on the dashboard,
 credential read at start, so after fixing a secret run `bridge service restart`. If every IM is down, the bridge
 still runs, so the dashboard can tell you why.
 
+An IM that drops after connecting reconnects on its own. Where the bridge sees the drop (Discord's gateway), the IM
+shows as `reconnecting` with the reason in the same places: nothing arrives meanwhile, but replies still go out.
+Owners get a DM if it lasts over 5 minutes (and again when it is back), and whenever messages sent meanwhile may be
+lost for good (Discord could not resume the session), so they can be sent again. Each drop and reconnect is logged.
+
 ## IM
 
 - **Slack**: `bridge slack manifest` prints the app manifest (the app is named "Bridge"); paste it at
@@ -100,8 +105,12 @@ still runs, so the dashboard can tell you why.
   link with the permissions the bot needs. Each conversation in a channel is a thread opened from its first
   message; DMs are plain. People are mapped by user id (`people: { alice: { discord: "123…" } }`). Without
   `message_content: true` (a privileged intent to switch on in the portal) the bot only reads DMs, mentions and
-  replies to it, so follow-ups in a thread mention it too, and `mention: false` routes are refused. What agents write
-  pings nobody.
+  replies to it, so follow-ups in a thread mention it too, and `mention: false` routes are refused; the first message
+  in a conversation thread that arrives blank for this reason gets a one-time hint saying so. Discord's @ list also
+  offers the bot's role, under the same name: a message that mentions the role instead of the app is answered with a
+  note to pick the entry marked APP, and isn't read. Every message the bot ignores is logged with why. What agents write
+  pings nobody. A gateway connection that hasn't completed its handshake within 30 seconds (a stalled proxy, say) is
+  dropped and tried again.
 
 Approvals and confirmations are buttons where the IM has them; typing `approve` / `deny` / `yes` also works.
 Progress shows in a placeholder message that is edited as the agent works (`defaults.progress`: `collapsed`,
@@ -200,7 +209,8 @@ Housekeeping runs a minute after start and then every 6 hours. It deletes:
 
 `bridge dashboard` opens `http://127.0.0.1:7377/`, served by the running bridge to this machine only:
 
-- **IM not connected**: an IM that failed to connect, why, and when it is tried next.
+- **IM not connected**: an IM that failed to connect, why, and when it is tried next; or one that is reconnecting
+  and receives nothing meanwhile.
 - **Waiting for you**: pending approvals, confirmations and config changes. You decide as the config's first owner.
 - **Conversations**: each with its agent, cost, activity and branch; merge or discard a branch (it shows what will
   happen first, waits for any running turn, and posts the result to the thread).

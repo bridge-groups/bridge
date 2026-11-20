@@ -27,7 +27,7 @@ export { Router, type InboundFile, type InboundMessage } from './core/router.ts'
 export type { ContentBlock, Envelope, Sender } from './core/envelope.ts';
 
 // IM connections
-export type { Choice, ImAdapter, InboundAction, OutboundMessage } from './adapters/im/types.ts';
+export type { Choice, ImAdapter, InboundAction, LinkChange, OutboundMessage } from './adapters/im/types.ts';
 export { SlackAdapter } from './adapters/im/slack.ts';
 export { FeishuAdapter } from './adapters/im/feishu.ts';
 export { TelegramAdapter } from './adapters/im/telegram.ts';

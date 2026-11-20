@@ -24,14 +24,25 @@ export interface InboundAction {
   value: string;
 }
 
+/**
+ * After a successful start, an adapter whose inbound connection can drop says so: `receiving: false` while it
+ * reconnects (sending may still work), `receiving: true` once it receives again. `missedSince` is set when what was
+ * sent from then on may never arrive (the platform could not replay it).
+ */
+export type LinkChange = { receiving: false; reason: string } | { receiving: true; missedSince?: number };
+
 /** An IM connection. Every adapter connects outbound (socket / long-poll), so no public URL is needed. */
 export interface ImAdapter {
   readonly platform: string;
   /**
    * Connect. When it rejects (a refused credential, no network) the adapter holds no connection, and the bridge
-   * calls `start` again later with the same callbacks.
+   * calls `start` again later with the same callbacks. `onLink` hears when receiving stops and resumes after that.
    */
-  start(onMessage: (msg: InboundMessage) => void, onAction?: (action: InboundAction) => void): Promise<void>;
+  start(
+    onMessage: (msg: InboundMessage) => void,
+    onAction?: (action: InboundAction) => void,
+    onLink?: (change: LinkChange) => void,
+  ): Promise<void>;
   stop(): Promise<void>;
   /** Returns the platform message id. */
   send(msg: OutboundMessage): Promise<string>;

@@ -2,7 +2,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { personIdOn, type BridgeConfig, type TrustLevel } from '../config/schema.ts';
 import { remoteAgents, type AgentFactory } from '../adapters/agent/index.ts';
 import { ShuttingDown, type AgentAdapter, type AgentReply, type Workspace } from '../adapters/agent/types.ts';
-import type { Choice, ImAdapter, InboundAction } from '../adapters/im/types.ts';
+import type { Choice, ImAdapter, InboundAction, LinkChange } from '../adapters/im/types.ts';
 import { randomUUID } from 'node:crypto';
 import { McpHub, type HubBackend, type SessionGrant, type ToolResult } from '../mcp/hub.ts';
 import { ToolHub } from '../mcp/tools.ts';
@@ -107,15 +107,18 @@ export interface BridgeOptions {
   log?: (line: string, level: 'info' | 'error') => void;
   /** How long an IM that failed to connect waits before the next try: `firstMs`, doubling up to `maxMs` (default 1 min to 30 min). */
   imRetry?: { firstMs: number; maxMs: number };
+  /** How long a connected IM may stop receiving (reconnecting) before the owners are told (default 5 min). */
+  imQuietMs?: number;
 }
 
 /**
  * One IM connection (see `Bridge.status`). An IM that fails to connect is `down` and is tried again with backoff;
- * the others keep working. `since` is when it entered this state; `error` says why it is down, without secrets.
+ * the others keep working. A connected IM that lost its inbound connection is `reconnecting`: nothing arrives, but
+ * replies still go out. `since` is when it entered this state; `error` says why, without secrets.
  */
 export interface ImConnection {
   platform: string;
-  state: 'connecting' | 'connected' | 'down';
+  state: 'connecting' | 'connected' | 'reconnecting' | 'down';
   since: number;
   error?: string;
   /** When a down IM is tried next. */
@@ -129,6 +132,10 @@ interface ImLink extends ImConnection {
   timer?: NodeJS.Timeout;
   /** Resolved once connected (or stopping): this IM's conversations wait for it. */
   ready: PromiseWithResolvers<void>;
+  /** While reconnecting: tells the owners once it has lasted `imQuietMs`. */
+  quiet?: NodeJS.Timeout;
+  /** The owners were told it stopped receiving, so they hear when it is back. */
+  toldQuiet?: boolean;
 }
 
 /** A conversation, for the app (see `Bridge.sessions`). */
@@ -216,6 +223,7 @@ export class Bridge implements HubBackend {
   /** Every IM by platform, with the state of its connection. */
   private readonly ims = new Map<string, ImLink>();
   private readonly imRetry: { firstMs: number; maxMs: number };
+  private readonly imQuietMs: number;
   private readonly agents = new Map<string, AgentAdapter>();
   private readonly injectedAgents: Set<string>;
   private readonly tools: ToolHub;
@@ -295,6 +303,7 @@ export class Bridge implements HubBackend {
       this.ims.set(im.platform, { im, platform: im.platform, state: 'connecting', since: Date.now(), failures: 0, ready: Promise.withResolvers() });
     }
     this.imRetry = opts.imRetry ?? { firstMs: 60e3, maxMs: 30 * 60e3 };
+    this.imQuietMs = opts.imQuietMs ?? 5 * 60e3;
     for (const [k, v] of opts.agents ?? []) this.agents.set(k, v);
     this.injectedAgents = new Set(opts.agents?.keys() ?? []);
     const oauthStorage = watchTokens(opts.oauthStorage ?? memoryStorage(), (t) => this.redactor.add(t));
@@ -344,6 +353,7 @@ export class Bridge implements HubBackend {
     clearTimeout(this.firstCleanUp);
     for (const link of this.ims.values()) {
       clearTimeout(link.timer);
+      clearTimeout(link.quiet);
       link.ready.resolve();
     }
     for (const ctx of this.active.values()) ctx.controller.abort(new ShuttingDown());
@@ -371,6 +381,7 @@ export class Bridge implements HubBackend {
       await im.start(
         (msg) => this.track(this.handleInbound(msg).catch((e) => this.warn(`inbound error: ${e?.stack ?? e}`))),
         (action) => this.track(this.handleAction(action).catch((e) => this.warn(`action error: ${e?.stack ?? e}`))),
+        (change) => this.linkChanged(link, change),
       );
     } catch (err) {
       if (this.stopping) return;
@@ -405,6 +416,42 @@ export class Bridge implements HubBackend {
     }
   }
 
+  /**
+   * A connected IM stopped or resumed receiving. Replies still go out meanwhile. The owners hear when it has been
+   * quiet for `imQuietMs` (and then when it is back), and whenever messages may have been lost.
+   */
+  private linkChanged(link: ImLink, change: LinkChange) {
+    if (this.stopping || (link.state !== 'connected' && link.state !== 'reconnecting')) return;
+    const { platform } = link;
+    if (!change.receiving) {
+      link.error = this.redactor.redact(change.reason).slice(0, 500);
+      if (link.state === 'reconnecting') return;
+      Object.assign(link, { state: 'reconnecting', since: Date.now() });
+      this.trace('-', 'im', platform, { state: 'reconnecting', error: link.error });
+      link.quiet = setTimeout(() => {
+        link.toldQuiet = true;
+        this.tellOwners(
+          `⚠️ ${platform} has not received anything for ${duration(Date.now() - link.since)}: ${link.error}. Still reconnecting; replies still go out.`,
+        );
+      }, this.imQuietMs);
+      link.quiet.unref();
+      return;
+    }
+    const notes: string[] = [];
+    if (link.toldQuiet) notes.push(`✅ ${platform} is receiving messages again.`);
+    if (change.missedSince !== undefined) {
+      const missed = `⚠️ ${platform} had to start a new session, so messages sent to the bot in the last ${duration(Date.now() - change.missedSince)} may not have arrived. Please send anything unanswered again.`;
+      this.warn(missed);
+      notes.push(missed);
+    }
+    clearTimeout(link.quiet);
+    if (link.state === 'reconnecting') {
+      Object.assign(link, { state: 'connected', since: Date.now(), error: undefined, quiet: undefined, toldQuiet: false });
+      this.trace('-', 'im', platform, { state: 'connected' });
+    }
+    if (notes.length) this.tellOwners(notes.join('\n'));
+  }
+
   private downNotice(link: ImLink): string {
     const next = link.retryAt ? ` Next try in ${duration(link.retryAt - Date.now())}.` : '';
     return `⚠️ ${link.platform} is not connected: ${link.error}.${next} Its conversations wait until it is back; a changed credential takes effect when the bridge restarts.`;
@@ -423,7 +470,7 @@ export class Bridge implements HubBackend {
     for (const person of Object.values(this.cfg.people)) {
       if (person.trust !== 'owner') continue;
       for (const [platform, link] of this.ims) {
-        const userId = link.state === 'connected' ? personIdOn(person, platform) : undefined;
+        const userId = sending(link) ? personIdOn(person, platform) : undefined;
         if (userId === undefined) continue;
         const dm = await this.store.getSession(dmKey(platform, userId));
         if (!dm) continue;
@@ -442,7 +489,7 @@ export class Bridge implements HubBackend {
   /** The adapter for `platform` (undefined when the bridge has none); throws while that IM is not connected. */
   private im(platform: string): ImAdapter | undefined {
     const link = this.ims.get(platform);
-    if (link && link.state !== 'connected') throw new Error(`${platform} is not connected${link.error ? `: ${link.error}` : ''}`);
+    if (link && !sending(link)) throw new Error(`${platform} is not connected${link.error ? `: ${link.error}` : ''}`);
     return link?.im;
   }
 
@@ -1452,7 +1499,7 @@ export class Bridge implements HubBackend {
       const person = Object.hasOwn(this.cfg.people, id) ? this.cfg.people[id] : undefined;
       if (!person) continue;
       for (const [platform, link] of this.ims) {
-        if (link.state !== 'connected') continue;
+        if (!sending(link)) continue;
         const userId = personIdOn(person, platform);
         if (userId === undefined) continue;
         const key = dmKey(platform, userId);
@@ -1765,6 +1812,11 @@ class BudgetRefusal extends Error {
 }
 
 /** 90000 → "2 min", 30000 → "30 s". */
+/** Whether messages can go out on this IM (a reconnecting one still sends). */
+function sending(link: ImConnection): boolean {
+  return link.state === 'connected' || link.state === 'reconnecting';
+}
+
 function duration(ms: number): string {
   return ms >= 60e3 ? `${Math.round(ms / 60e3)} min` : `${Math.max(1, Math.round(ms / 1e3))} s`;
 }

@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { AgentAdapter, AgentTurn } from '../adapters/agent/types.ts';
-import type { Choice, ImAdapter, InboundAction, OutboundMessage } from '../adapters/im/types.ts';
+import type { Choice, ImAdapter, InboundAction, LinkChange, OutboundMessage } from '../adapters/im/types.ts';
 import type { InboundMessage } from '../core/router.ts';
 
 /** Wait for a condition, never a fixed delay; fails after `ms` so a broken test can't hang. */
@@ -39,6 +39,7 @@ export class FakeIm implements ImAdapter {
   readonly edits: { messageId: string; text: string }[] = [];
   private onMessage?: (m: InboundMessage) => void;
   private onAction?: (a: InboundAction) => void;
+  private onLink?: (c: LinkChange) => void;
   readonly choiceMessages = new Map<string, { text: string; choices: Choice[]; outcome?: string }>();
   readonly notices: { userId: string; text: string }[] = [];
   private n = 0;
@@ -58,11 +59,16 @@ export class FakeIm implements ImAdapter {
     this.failing = { message, times };
     return this;
   }
-  async start(cb: (m: InboundMessage) => void, onAction?: (a: InboundAction) => void) {
+  async start(cb: (m: InboundMessage) => void, onAction?: (a: InboundAction) => void, onLink?: (c: LinkChange) => void) {
     this.starts++;
     if (this.failing && this.failing.times-- > 0) throw new Error(this.failing.message);
     this.onMessage = cb;
     this.onAction = onAction;
+    this.onLink = onLink;
+  }
+  /** Report that receiving stopped or resumed, like a dropped socket that reconnects. */
+  link(change: LinkChange) {
+    this.onLink!(change);
   }
   /** Give this fake buttons (like Slack). */
   withButtons() {

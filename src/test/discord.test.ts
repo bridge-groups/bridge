@@ -1,10 +1,10 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { DiscordAdapter } from '../adapters/im/discord.ts';
-import type { InboundAction } from '../adapters/im/types.ts';
+import type { InboundAction, LinkChange } from '../adapters/im/types.ts';
 import type { InboundMessage } from '../core/router.ts';
 import { until } from './helpers.ts';
 
@@ -85,7 +85,21 @@ async function fakeDiscord() {
     '10': { type: 0, name: 'general' },
   };
   const threads = new Set<string>();
-  const state = { heartbeatInterval: 45_000, ackBeats: true, beats: 0, seq: 0, rateLimits: 0, closeOnIdentify: 0, threadError: 0 };
+  const state = {
+    heartbeatInterval: 45_000,
+    ackBeats: true,
+    beats: 0,
+    seq: 0,
+    rateLimits: 0,
+    closeOnIdentify: 0,
+    threadError: 0,
+    /** How the gateway answers a connection: normally, not at all (TCP open, no handshake), or without Hello. */
+    upgrade: 'ok' as 'ok' | 'hang' | 'silent',
+    /** Answer every RESUME with "invalid session, not resumable". */
+    refuseResume: false,
+  };
+  /** Sockets the gateway accepted but never answered. */
+  const hung: Socket[] = [];
   let nextId = 5000;
 
   const onText = (conn: Conn, text: string) => {
@@ -96,6 +110,7 @@ async function fakeDiscord() {
       conn.send({ op: 0, t: 'READY', s: ++state.seq, d: { session_id: 'sess', resume_gateway_url: gateway, user: { id: '99' }, application: { id: 'app' } } });
     } else if (p.op === 6) {
       resumes.push(p.d);
+      if (state.refuseResume) return conn.send({ op: 9, d: false });
       conn.send({ op: 0, t: 'RESUMED', s: ++state.seq, d: {} });
     } else if (p.op === 1) {
       state.beats++;
@@ -120,6 +135,13 @@ async function fakeDiscord() {
       let m: RegExpExecArray | null;
       if (call.path === '/users/@me') return json(res, 200, { id: '99' });
       if (call.path === '/gateway/bot') return json(res, 200, { url: gateway });
+      if (call.path === '/guilds/g/roles') {
+        return json(res, 200, [
+          { id: 'g', name: '@everyone' },
+          { id: 'r-bot', name: 'Bridge', managed: true, tags: { bot_id: '99' } },
+          { id: 'r-mods', name: 'mods' },
+        ]);
+      }
       if ((m = /^\/channels\/(\d+)$/.exec(call.path))) {
         const c = channels[m[1]!];
         return c ? json(res, 200, { id: m[1], ...c }) : json(res, 404, { message: 'Unknown Channel', code: 10003 });
@@ -147,13 +169,20 @@ async function fakeDiscord() {
   server.on('upgrade', (req, socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    if (state.upgrade === 'hang') {
+      // Read (and ignore) what arrives, and close when the client does (upgraded sockets are half-open).
+      socket.resume();
+      socket.on('end', () => socket.destroy());
+      return void hung.push(socket);
+    }
     const accept = createHash('sha1')
       .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
       .digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     const conn = new Conn(socket, onText);
     conns.push(conn);
-    conn.send({ op: 10, d: { heartbeat_interval: state.heartbeatInterval } });
+    if (state.upgrade === 'ok') conn.send({ op: 10, d: { heartbeat_interval: state.heartbeatInterval } });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const port = (server.address() as AddressInfo).port;
@@ -170,6 +199,7 @@ async function fakeDiscord() {
     channels,
     threads,
     state,
+    hung,
     current,
     dispatch(t: string, d: object) {
       current().send({ op: 0, t, s: ++state.seq, d });
@@ -403,6 +433,176 @@ test('discord: a refused intent fails start with what to do; rate limits are wai
       await a.stop();
     }
   } finally {
+    await dc.close();
+  }
+});
+
+test('discord: a gateway that never completes the handshake or never says Hello fails start, and is let go', async () => {
+  const dc = await fakeDiscord();
+  try {
+    dc.state.upgrade = 'hang';
+    const a = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase, handshakeTimeoutMs: 100 });
+    await assert.rejects(a.start(() => {}), /discord: gateway connection not open within 0\.1 s/);
+    await until(() => dc.hung.length === 1 && dc.hung[0]!.destroyed, 'the stalled socket to be closed');
+
+    dc.state.upgrade = 'silent';
+    // The same adapter can start again (the bridge retries it).
+    await assert.rejects(a.start(() => {}), /discord: gateway no Hello within 0\.1 s/);
+    await until(() => dc.conns.length === 1 && dc.conns[0]!.closed, 'the silent connection to be closed');
+
+    dc.state.upgrade = 'ok';
+    await a.start(() => {});
+    assert.equal(dc.identifies.length, 1);
+    await a.stop();
+  } finally {
+    await dc.close();
+  }
+});
+
+test('discord: after a dead connection, stalled reconnects are retried until the session resumes; receiving is reported', async () => {
+  const dc = await fakeDiscord();
+  dc.state.heartbeatInterval = 30;
+  const a = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase, handshakeTimeoutMs: 100 });
+  const links: LinkChange[] = [];
+  const got: InboundMessage[] = [];
+  try {
+    await a.start((m) => got.push(m), undefined, (c) => links.push(c));
+    await until(() => dc.state.beats >= 1, 'a heartbeat');
+
+    // The connection dies quietly and the way back is stuck behind a proxy: no close, no Hello.
+    dc.state.upgrade = 'hang';
+    dc.state.ackBeats = false;
+    await until(() => dc.hung.length >= 1, 'a reconnect attempt');
+    assert.deepEqual(links[0], { receiving: false, reason: 'gateway heartbeat not acknowledged' });
+    await until(() => links.length >= 2, 'the stalled attempt to be given up');
+    assert.deepEqual(links[1], { receiving: false, reason: 'gateway connection not open within 0.1 s' });
+    await until(() => dc.hung.every((s) => s.destroyed), 'stalled sockets to be closed');
+
+    dc.state.upgrade = 'ok';
+    dc.state.ackBeats = true;
+    await until(() => dc.resumes.length === 1, 'a resume once the gateway answers', 15_000);
+    await until(() => links.at(-1)?.receiving === true, 'receiving again');
+    assert.deepEqual(links.at(-1), { receiving: true });
+    dc.dispatch('MESSAGE_CREATE', inChannel('1000', '<@99> back'));
+    await until(() => got.length === 1, 'a message on the resumed session');
+  } finally {
+    await a.stop();
+    await dc.close();
+  }
+});
+
+test('discord: a refused resume starts a new session and reports that events may be lost', async () => {
+  const dc = await fakeDiscord();
+  const a = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase });
+  const links: LinkChange[] = [];
+  const got: InboundMessage[] = [];
+  try {
+    await a.start((m) => got.push(m), undefined, (c) => links.push(c));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1000', '<@99> one'));
+    await until(() => got.length === 1, 'a message');
+    const before = Date.now();
+
+    dc.state.refuseResume = true;
+    dc.current().end(4000);
+    await until(() => dc.identifies.length === 2, 'a fresh identify after the refused resume', 15_000);
+    assert.equal(dc.resumes.length, 1);
+    await until(() => links.at(-1)?.receiving === true, 'receiving again');
+    const back = links.at(-1) as { receiving: true; missedSince?: number };
+    assert.ok(back.missedSince !== undefined && back.missedSince <= before, 'events since the last one received may be lost');
+    assert.deepEqual(
+      links.filter((l) => !l.receiving).map((l) => (l as { reason: string }).reason),
+      ['gateway connection closed (4000)', 'gateway resume refused'],
+    );
+  } finally {
+    await a.stop();
+    await dc.close();
+  }
+});
+
+test('discord: without Message Content, a blank message in a conversation thread gets one hint', async () => {
+  const dc = await fakeDiscord();
+  dc.channels['3000'] = { type: 11, name: 'hi', parent_id: '10' };
+  const a = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase });
+  const got: InboundMessage[] = [];
+  try {
+    await a.start((m) => got.push(m));
+    const hints = () => dc.writes().filter((c) => /Message Content intent/.test(c.body?.content ?? ''));
+    // A blank message in a channel, and in a thread the bot has no part in: nothing.
+    dc.dispatch('MESSAGE_CREATE', inChannel('1001', ''));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1002', '', { channel_id: '3000' }));
+    // The bot is mentioned in the thread: now it is a conversation.
+    dc.dispatch('MESSAGE_CREATE', inChannel('1003', '<@99> go on', { channel_id: '3000' }));
+    await until(() => got.length === 1, 'the mention');
+    assert.equal(hints().length, 0);
+
+    dc.dispatch('MESSAGE_CREATE', inChannel('1004', '', { channel_id: '3000' }));
+    await until(() => hints().length === 1, 'the hint');
+    assert.equal(hints()[0]!.path, '/channels/3000/messages');
+    assert.deepEqual(hints()[0]!.body.allowed_mentions, { parse: [] });
+    dc.dispatch('MESSAGE_CREATE', inChannel('1005', '', { channel_id: '3000' }));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1006', '<@99> and?', { channel_id: '3000' }));
+    await until(() => got.length === 2, 'the next mention');
+    assert.equal(hints().length, 1, 'once per thread');
+  } finally {
+    await a.stop();
+  }
+
+  // With the intent a blank message is a sticker or an embed: no hint.
+  const b = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase, messageContent: true });
+  try {
+    await b.start(() => {});
+    const writes = dc.writes().length;
+    dc.dispatch('MESSAGE_CREATE', inChannel('1007', '<@99> x', { channel_id: '3000' }));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1008', '', { channel_id: '3000' }));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1009', '<@99> y', { channel_id: '3000' }));
+    await until(() => dc.calls.length > 0 && dc.writes().length === writes, 'nothing written');
+    await b.stop();
+    assert.equal(dc.writes().length, writes);
+  } finally {
+    await dc.close();
+  }
+});
+
+test('discord: a message mentioning the bot role instead of the bot gets a reply saying so; every ignored message is logged with why', async () => {
+  const dc = await fakeDiscord();
+  const logged: string[] = [];
+  const log = mock.method(console, 'log', (line: string) => void logged.push(line));
+  const a = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase });
+  const got: InboundMessage[] = [];
+  try {
+    await a.start((m) => got.push(m));
+    const hints = () => dc.writes().filter((c) => /role, not the app/.test(c.body?.content ?? ''));
+    // What Discord sends without the Message Content intent when the role is picked from the @ list.
+    dc.dispatch('MESSAGE_CREATE', inChannel('1100', '', { mention_roles: ['r-bot'] }));
+    await until(() => hints().length === 1, 'the hint');
+    assert.equal(hints()[0]!.path, '/channels/10/messages');
+    assert.equal(hints()[0]!.body.content, "You mentioned the @Bridge role, not the app, so I didn't read this. Mention the app instead: in the @ list, pick the entry marked APP.");
+    assert.deepEqual(hints()[0]!.body.message_reference, { message_id: '1100', fail_if_not_exists: false });
+    assert.deepEqual(hints()[0]!.body.allowed_mentions, { parse: [] });
+
+    // Every time, since each was meant for the bot; the roles are looked up once per server.
+    dc.dispatch('MESSAGE_CREATE', inChannel('1101', '', { mention_roles: ['r-bot'] }));
+    // Another role, another bot, a join notice, a blank message: no reply, but a log line each.
+    dc.dispatch('MESSAGE_CREATE', inChannel('1102', '', { mention_roles: ['r-mods'] }));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1103', 'hi', { author: { id: '7', username: 'otherbot', bot: true } }));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1104', '', { type: 7 }));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1105', '<@99> real'));
+    await until(() => got.length === 1, 'the real mention');
+    assert.equal(got[0]!.text, 'real');
+    assert.equal(hints().length, 2);
+    assert.equal(dc.calls.filter((c) => c.path === '/guilds/g/roles').length, 1);
+
+    const ignored = logged.filter((l) => l.startsWith('discord: ignored'));
+    assert.deepEqual(ignored, [
+      'discord: ignored message 1100 in channel 10: mentions the Bridge role, not the app',
+      'discord: ignored message 1101 in channel 10: mentions the Bridge role, not the app',
+      'discord: ignored message 1102 in channel 10: blank: it does not mention the app, and the bot has no Message Content intent',
+      'discord: ignored message 1103 in channel 10: sent by a bot',
+      'discord: ignored message 1104 in channel 10: message type 7',
+    ]);
+  } finally {
+    await a.stop();
+    log.mock.restore();
     await dc.close();
   }
 });
