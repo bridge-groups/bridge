@@ -4,6 +4,13 @@
   "license": "MIT",
   "version": "0.1.0",
   "description": "Connect agents to IM, to other agents, and to tools: a library to embed in an app or service, and a CLI for your own machine.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bridge-groups/bridge.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "bridge": "out/cli.js"
   },
