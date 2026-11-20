@@ -226,9 +226,11 @@ test('housekeeping survives stray files in the files folder and still expires ol
 });
 
 test('ask_human: an unknown sender on a sender: anyone route can answer, and a huge timeout is clamped', async () => {
-  const boss = scripted('boss', async (mcp) =>
-    'answer: ' + text(await mcp.callTool({ name: 'ask_human', arguments: { question: 'which env?', timeout_minutes: 1e9 } })),
-  );
+  let callTimeoutMs = 0;
+  const boss = scripted('boss', async (mcp, turn) => {
+    callTimeoutMs = turn.mcp.callTimeoutMs;
+    return 'answer: ' + text(await mcp.callTool({ name: 'ask_human', arguments: { question: 'which env?', timeout_minutes: 1e9 } }));
+  });
   const { im, bridge } = await setup({ agents: [boss] });
   im.onSend((m) => {
     if (m.text.startsWith('❓')) queueMicrotask(() => im.receive({ userId: 'U9', text: 'staging', channelName: 'open', mentioned: false }));
@@ -237,6 +239,7 @@ test('ask_human: an unknown sender on a sender: anyone route can answer, and a h
     im.receive({ userId: 'U9', text: 'deploy', channelName: 'open' });
     await bridge.idle();
     assert.match(im.transcript().join('\n'), /answer: staging/);
+    assert.ok(callTimeoutMs > 24 * 3600e3, 'the agent may wait for a call as long as the longest ask_human');
   } finally {
     await bridge.stop();
   }

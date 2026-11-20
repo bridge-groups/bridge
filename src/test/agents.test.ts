@@ -23,7 +23,7 @@ function turn(text: string, extra: Partial<AgentTurn> = {}): AgentTurn {
     sender: { kind: 'person', id: 'alice', platform: 'slack', platformUserId: 'U1' },
     sessionKey: 'slack:C1:T1', content: [{ type: 'text', text }], trust: 'owner', initiator: 'alice', hops: 0, tainted: false,
   });
-  return { envelope, text, mcp: { url: 'http://127.0.0.1:1/mcp/t', endpoint: 'http://127.0.0.1:1/mcp', token: 't' }, ...extra };
+  return { envelope, text, mcp: { url: 'http://127.0.0.1:1/mcp/t', endpoint: 'http://127.0.0.1:1/mcp', token: 't', callTimeoutMs: 60e3 }, ...extra };
 }
 
 
@@ -76,6 +76,18 @@ printf '{"type":"result","result":"resume=%s","session_id":"S1"}\\n' "$resume"
 
   // A session from another directory is not resumed.
   assert.equal((await agent.run(turn('x', { agentSessionId: 'S1@000000000000' }))).text, 'resume=none');
+});
+
+test('claude-code: the bridge server in its MCP config allows a call as long as the turn says', async () => {
+  const bin = tmp('ab-cc-');
+  const fake = script(bin, 'claude', `#!/bin/sh
+cat > /dev/null
+while [ $# -gt 0 ]; do [ "$1" = "--mcp-config" ] && config="$2"; shift; done
+printf '{"type":"result","result":%s,"session_id":"S1"}\\n' "$(${JSON.stringify(process.execPath)} -e 'process.stdout.write(JSON.stringify(require("node:fs").readFileSync(process.argv[1], "utf8")))' "$config")"
+`);
+  const agent = new ClaudeCodeAgent('cc', claudeCfg(fake, { cwd: bin }), envSecrets(), tmp('ab-cc-tmp-'));
+  const reply = await agent.run(turn('hi', { mcp: { url: 'http://127.0.0.1:1/mcp/t', endpoint: 'http://127.0.0.1:1/mcp', token: 't', callTimeoutMs: 86_460_000 } }));
+  assert.deepEqual(JSON.parse(reply.text).mcpServers.bridge, { type: 'http', url: 'http://127.0.0.1:1/mcp/t', timeout: 86_460_000 });
 });
 
 test('claude-code: a failed run is answered with the reasons Claude Code gives, not just the subtype', async () => {
@@ -281,7 +293,7 @@ test('codex: runs codex exec with the bridge as an MCP server, reports progress,
   const steps: string[] = [];
   const ids: string[] = [];
   const t = turn('fix it', {
-    mcp: { url: 'http://127.0.0.1:1/mcp/SECRET-TOKEN', endpoint: 'http://127.0.0.1:1/mcp', token: 'SECRET-TOKEN' },
+    mcp: { url: 'http://127.0.0.1:1/mcp/SECRET-TOKEN', endpoint: 'http://127.0.0.1:1/mcp', token: 'SECRET-TOKEN', callTimeoutMs: 86_460_000 },
     files: [{ name: 'shot.png', path: '/tmp/in/shot.png', mime: 'image/png' }, { name: 'log.txt', path: '/tmp/in/log.txt' }],
     onProgress: (s) => steps.push(s),
     onSessionId: (id) => ids.push(id),
@@ -304,6 +316,7 @@ test('codex: runs codex exec with the bridge as an MCP server, reports progress,
   assert.equal(config('sandbox_mode'), 'read-only');
   assert.equal(config('mcp_servers.bridge.url'), 'http://127.0.0.1:1/mcp');
   assert.equal(config('mcp_servers.bridge.bearer_token_env_var'), 'BRIDGE_MCP_TOKEN');
+  assert.equal(config('mcp_servers.bridge.tool_timeout_sec'), 86_460, 'a call may wait as long as the turn allows');
   assert.match(config('developer_instructions'), /reached through bridge/);
   assert.equal(run.token, 'SECRET-TOKEN', 'the token comes in the environment…');
   assert.ok(!run.argv.join(' ').includes('SECRET-TOKEN'), '…never on the command line');

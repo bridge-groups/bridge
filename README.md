@@ -133,6 +133,10 @@ default 20) and handed to the agent as local paths (A2A agents get their content
   `headers` carry its credentials, and each conversation is one A2A context. See
   [doc/agents.md](doc/agents.md#a2a-agents).
 
+A tool call that waits for a person (`ask_human`, an approval) or another agent (`delegate`) may take up to a day:
+`claude-code` and `codex` agents are told to allow one call to the bridge 24 hours and a minute instead of their
+default 60 seconds. A longer approval `timeout` or delegated turn ends at that bound.
+
 A `budget_usd` policy caps what a conversation may spend: each turn starts with only what is left (Claude Code gets
 it as `--max-budget-usd`), and a turn starts only when that covers the agent's cheapest recent turn. Codex reports
 tokens, not dollars, so budgets don't limit `codex` agents.

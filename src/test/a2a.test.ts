@@ -102,7 +102,7 @@ function turn(text: string, extra: Partial<AgentTurn> = {}): AgentTurn {
     sender: { kind: 'person', id: 'alice', platform: 'slack', platformUserId: 'U1' },
     sessionKey: 'slack:C1:T1', content: [{ type: 'text', text }], trust: 'owner', initiator: 'alice', hops: 0, tainted: false,
   });
-  return { envelope, text, mcp: { url: 'http://127.0.0.1:1/mcp/t', endpoint: 'http://127.0.0.1:1/mcp', token: 't' }, ...extra };
+  return { envelope, text, mcp: { url: 'http://127.0.0.1:1/mcp/t', endpoint: 'http://127.0.0.1:1/mcp', token: 't', callTimeoutMs: 60e3 }, ...extra };
 }
 
 const agentFor = (url: string, headers: Record<string, string> = {}, timeout = '1m') =>

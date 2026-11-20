@@ -17,6 +17,12 @@ endpoint offers:
 | `delegate` | hand a task to another agent the routes allow; trust drops to `agent`, hops +1 |
 | `<server>__<tool>` | a tool of a tool server the routes allow, after approval where a policy requires it |
 
+A call can wait a long time: `ask_human` up to a day, an approval as long as its policy's `timeout`, `delegate` until
+the other agent's turn ends. MCP clients often give up much sooner (Claude Code and Codex after 60 seconds by
+default), so the bridge raises the limit for its built-in agents to 24 hours and a minute per call (`timeout` in
+Claude Code's MCP config, `tool_timeout_sec` for Codex); a wait longer than that ends there. A webhook or stdio agent
+that calls these tools should let its MCP client wait as long.
+
 ## Messages
 
 Both kinds of agent exchange the same JSON messages ([protocol.ts](../src/adapters/agent/protocol.ts)):

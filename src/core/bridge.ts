@@ -199,6 +199,12 @@ const COMMANDS = new Map<string, 'status' | 'merge' | 'discard' | 'pr'>([
 
 /** ask_human waits between 1 minute and 1 day, whatever the agent asks for. */
 const ASK_MINUTES = { default: 30, min: 1, max: 24 * 60 };
+/**
+ * How long one call to a turn's MCP endpoint may wait before the agent's MCP client gives up: the longest ask_human
+ * plus a minute. A longer wait (an approval timeout over a day, a delegated turn) ends here too, and so does a call
+ * stuck past every wait the bridge sets.
+ */
+const MCP_CALL_MS = (ASK_MINUTES.max + 1) * 60e3;
 
 /** How long `sessions` reuses a conversation's branch status (git is slow); turn ends and merges refresh it. */
 const BRANCH_CACHE_MS = 30e3;
@@ -876,7 +882,7 @@ export class Bridge implements HubBackend {
         files: ctx.envelope.content.flatMap((b) =>
           b.type === 'file' && b.path ? [{ name: b.name, path: b.path, mime: b.mime }] : [],
         ),
-        mcp: { url: grant.url, endpoint: grant.endpoint, token: grant.token },
+        mcp: { url: grant.url, endpoint: grant.endpoint, token: grant.token, callTimeoutMs: MCP_CALL_MS },
         onProgress: opts.onProgress,
         onSessionId: (id) => this.later(() => this.store.updateSession(ctx.sessionKey, { agentSession: { agent: ctx.agent, id } })),
         onNotice: (note) => void this.notify(ctx.thread, note),

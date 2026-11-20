@@ -35,6 +35,8 @@ export class CodexAgent extends CliAgent {
       ...set('developer_instructions', instructions),
       ...set('mcp_servers.bridge.url', turn.mcp.endpoint),
       ...set('mcp_servers.bridge.bearer_token_env_var', TOKEN_ENV),
+      // Codex's limit for one call to this server (default 60s), long enough for a person's answer.
+      '-c', `mcp_servers.bridge.tool_timeout_sec=${Math.ceil(turn.mcp.callTimeoutMs / 1e3)}`,
       // The bridge's own tools are checked by its policies; Codex needn't ask again.
       ...set('mcp_servers.bridge.default_tools_approval_mode', 'approve'),
     ];

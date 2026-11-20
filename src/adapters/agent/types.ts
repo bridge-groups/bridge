@@ -13,9 +13,11 @@ export interface AgentTurn {
   /**
    * Session-scoped MCP endpoint the agent can call back into (send_message, ask_human, delegate, tools): `url`
    * carries the token in its path; `endpoint` is the same server for clients that send the token as
-   * `Authorization: Bearer <token>` instead, which keeps it out of a command line.
+   * `Authorization: Bearer <token>` instead, which keeps it out of a command line. `callTimeoutMs` is how long one
+   * call may wait for its result (an answer from a person, an approval, a delegated turn): agents whose MCP client
+   * gives up sooner by default are told to allow this much.
    */
-  mcp: { url: string; endpoint: string; token: string };
+  mcp: { url: string; endpoint: string; token: string; callTimeoutMs: number };
   /** Short progress lines ("Reading src/…"). */
   onProgress?: (line: string) => void;
   /** The agent's session id, as soon as it is known (lets a crashed turn be resumed). */

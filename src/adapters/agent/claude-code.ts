@@ -24,7 +24,9 @@ export class ClaudeCodeAgent extends CliAgent {
   protected invocation(_cwd: string, turn: AgentTurn, instructions: string, resume: string | undefined): CliInvocation {
     const dir = mkdtempSync(join(privateDir(this.tempDir), 'claude-'));
     const mcpFile = join(dir, 'mcp.json');
-    writeFileSync(mcpFile, JSON.stringify({ mcpServers: { bridge: { type: 'http', url: turn.mcp.url } } }), {
+    // `timeout` (ms) is Claude Code's limit for one call to this server; without it an HTTP call ends after 60s.
+    const bridge = { type: 'http', url: turn.mcp.url, timeout: turn.mcp.callTimeoutMs };
+    writeFileSync(mcpFile, JSON.stringify({ mcpServers: { bridge } }), {
       mode: 0o600,
     });
     const args = [
