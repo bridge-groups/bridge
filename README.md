@@ -184,9 +184,11 @@ bridge service status
 bridge service uninstall
 ```
 
-Logs go to `~/Library/Logs/bridge/bridge.log`. The service starts with a bare environment, so `install` refuses a
-config that uses `env:` references or names secrets missing from the keychain. Messages that arrive while the bridge
-is down run when it is back, within `offline_queue_ttl` (default 24h).
+Logs go to `~/Library/Logs/bridge/bridge.log`, each line starting with its ISO-8601 time (UTC): `bridge up` stamps
+every line whenever its output is not a terminal, so a log redirected to a file gets them too. The service starts
+with a bare environment, so `install` refuses a config that uses `env:` references or names secrets missing from the
+keychain. Messages that arrive while the bridge is down run when it is back, within `offline_queue_ttl` (default
+24h).
 
 Housekeeping runs a minute after start and then every 6 hours. It deletes:
 - attachments older than `files_ttl` (default 7d);

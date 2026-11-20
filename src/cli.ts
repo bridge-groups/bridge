@@ -37,6 +37,7 @@ import { branchSlug, expandHome, listWorktrees, pruneIdle, statusAt } from './ad
 import { localBaseUrl, parseDuration, sessionSlug } from './core/address.ts';
 import { CONFIG_FILE, DATA_DIR, TEMP_DIR } from './paths.ts';
 import { installService, restartService, serviceStatus, uninstallService } from './service.ts';
+import { stampLines } from './stamps.ts';
 
 const HELP = `bridge — connect agents to IM, to each other, and to tools
 
@@ -108,6 +109,9 @@ async function main() {
       return;
     }
     case 'up':
+      // Logs read later (the service's log file) get a time on every line.
+      stampLines(process.stdout);
+      stampLines(process.stderr);
       return run(configPath, (cfg, secrets) => buildIms(cfg, dataDir(cfg, configPath), secrets));
     case 'chat': {
       if (!values.as) fail('chat needs --as <person id from people:>');

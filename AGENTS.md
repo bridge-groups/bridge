@@ -107,7 +107,7 @@ src/                     all source code
   index.ts               the library's entry point (@bridge-groups/bridge): nothing CLI-only or local
   local.ts               opt-in local agents (@bridge-groups/bridge/local)
   cli.ts                 commands (bridge init | up | chat | check | doctor | auth | dashboard | service | …);
-                         with paths.ts, secrets.ts, keychain-oauth.ts, service.ts, template.ts, config/gate.ts, web/
+                         with paths.ts, secrets.ts, keychain-oauth.ts, service.ts, stamps.ts, template.ts, config/gate.ts, web/
   config/                bridge.yaml schema (zod), checks with line numbers, tests, change review
   core/                  router, policies, SQLite store, the Bridge orchestrator
   mcp/                   per-turn MCP hub, external tool servers (stdio / HTTP), OAuth sign-in
