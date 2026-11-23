@@ -5,8 +5,8 @@ Discord or Telegram reach agents such as Claude Code or Codex; each agent turn c
 another agent and call the tool servers its routes allow; policies decide approvals and budgets; everything lands
 in an audit trail with secrets redacted.
 
-- **IM**: Slack (Socket Mode), Feishu / Lark (long connection) and Discord (Gateway WebSocket), all outbound, so you
-  need no public URL. Telegram (long polling) is written but not yet tested against the real service.
+- **IM**: Slack (Socket Mode), Feishu / Lark (long connection), Discord (Gateway WebSocket) and Telegram (long
+  polling), all outbound, so you need no public URL.
 - **Tools**: MCP servers, local or remote. The bridge holds the credentials and gives each agent only what its
   routes allow.
 - **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, remote agents speaking A2A, or any
@@ -111,6 +111,13 @@ lost for good (Discord could not resume the session), so they can be sent again.
   note to pick the entry marked APP, and isn't read. Every message the bot ignores is logged with why. What agents write
   pings nobody. A gateway connection that hasn't completed its handshake within 30 seconds (a stalled proxy, say) is
   dropped and tried again.
+- **Telegram**: create the bot with @BotFather (`/newbot`) and store its token with `bridge secret set`. For groups,
+  turn privacy mode off (`/setprivacy` → Disable, then remove the bot from each group and add it again): with it on,
+  the bot gets only commands and replies to it there, not messages that mention it, and `bridge up` logs a warning.
+  People are mapped by numeric user id (`people: { alice: { telegram: "123…" } }`), which @userinfobot tells you. A
+  conversation in a group is a reply chain from its first message; replying to the bot continues it without a
+  mention. Replies are sent as Telegram HTML, tables as a monospace grid. Bots can download files up to 20 MB;
+  stickers, voice and video messages get a reply that the bot can't read them.
 
 Approvals and confirmations are buttons where the IM has them; typing `approve` / `deny` / `yes` also works.
 Progress shows in a placeholder message that is edited as the agent works (`defaults.progress`: `collapsed`,
@@ -235,7 +242,6 @@ tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` sho
 
 ## Not in v0.1 yet
 
-- Telegram tested against the real service
 - An A2A server: bridge agents reachable by other A2A clients (the bridge is an A2A client today)
 - A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP
   events, per-user isolation and limits, agents that run user code in sandboxes

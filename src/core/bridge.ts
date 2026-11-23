@@ -623,7 +623,7 @@ export class Bridge implements HubBackend {
     if (msg.unreadable && !msg.text.trim() && !msg.files?.length) {
       this.trace(key, 'ignored', senderId, { unreadable: msg.unreadable });
       if (!addressed) return;
-      if (person) await this.send(thread, `I can't read ${msg.unreadable}. Please send it as text${msg.platform === 'telegram' ? '' : ' or a file'}.`);
+      if (person) await this.send(thread, `I can't read ${msg.unreadable}. Please send it as text or a file.`);
       else await this.tellStranger(thread, msg);
       return;
     }

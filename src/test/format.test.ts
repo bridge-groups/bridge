@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { toSlackMrkdwn, truncateMrkdwn } from '../adapters/im/slack-format.ts';
 import { width } from '../adapters/im/markdown.ts';
 import { toDiscordMarkdown, truncateDiscord } from '../adapters/im/discord-format.ts';
+import { toTelegramHtml } from '../adapters/im/telegram-format.ts';
 import { isPersonMessage } from '../adapters/im/slack.ts';
 import { split } from '../core/bridge.ts';
 
@@ -110,4 +111,21 @@ test('discord: text is cut to the limit without leaving a code fence open', () =
   assert.ok(cut.length <= 2000);
   assert.ok(cut.endsWith('```\n…'));
   assert.equal(truncateDiscord('short', 2000), 'short');
+});
+
+test('telegram: markdown becomes Telegram HTML, escaped everywhere, code untouched', () => {
+  assert.equal(
+    toTelegramHtml('**bold** *it* _it_ ~~gone~~ `x<y && z` [docs](https://e.com/?a=1&b="2") snake_case_name a < b'),
+    '<b>bold</b> <i>it</i> <i>it</i> <s>gone</s> <code>x&lt;y &amp;&amp; z</code> <a href="https://e.com/?a=1&amp;b=&quot;2&quot;">docs</a> snake_case_name a &lt; b',
+  );
+  assert.equal(
+    toTelegramHtml('## Status\n- [x] done\n  - **sub**\n> quoted\n> more\n---\n```ts\nif (a < b) **x**\n```'),
+    '<b>Status</b>\n• ☑ done\n    • <b>sub</b>\n<blockquote>quoted\nmore</blockquote>\n──────────\n<pre><code class="language-ts">if (a &lt; b) **x**</code></pre>',
+  );
+});
+
+test('telegram: tables become a grid in <pre>, or records when too wide for a phone', () => {
+  assert.equal(toTelegramHtml('| 文件 | 大小 |\n|---|---|\n| `a.ts` | 3 KB |'), '<pre>文件  大小\n────  ────\na.ts  3 KB</pre>');
+  const wide = toTelegramHtml('| Name | Description |\n|---|---|\n| **x** | a very long description that cannot fit in forty columns |');
+  assert.equal(wide, '<b>x</b>\n• Description: a very long description that cannot fit in forty columns');
 });
