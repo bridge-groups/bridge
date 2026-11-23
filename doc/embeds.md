@@ -54,7 +54,9 @@ await bridge.start();
   trail. Its methods may return promises, so it can live in your database; `SqliteStore` is the default. A
   conversation records the agent holding it; each agent's own session id in it is kept apart (`agentSession`, and
   `updateSession` with `agentSession`), so switching agents and back resumes each one's session. `deleteSession` and
-  `prune` remove those ids with their conversation. `takePending` also returns the entries it has just expired
+  `prune` remove those ids with their conversation. `addSpending`, `spendingSince` and `spendersSince` keep what
+  turns begun by senders outside `people` cost, for `defaults.external_budget`; `prune` drops entries older than its
+  window (`spendingBefore`). `takePending` also returns the entries it has just expired
   (status `expired`), so their threads hear the message was dropped. The audit trail's newest entry tells the next
   start how long the bridge was away (`kind: bridge` with `state: stopped` after a clean stop).
 - **Temporary files.** Attachments and agents' scratch files go under `tempDir` (default: `bridge` in the OS temp

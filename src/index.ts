@@ -7,7 +7,7 @@
  */
 
 // The bridge
-export { Bridge, type AuditEntry, type BridgeOptions, type ImConnection, type PendingChoice, type SessionInfo, type ToolServerInfo } from './core/bridge.ts';
+export { Bridge, type AuditEntry, type BridgeOptions, type ExternalSpend, type ImConnection, type PendingChoice, type SessionInfo, type ToolServerInfo } from './core/bridge.ts';
 
 // Config: parse and check it, see what a change does
 export { parseConfig, checkConfig, formatIssue, ConfigError, type ConfigIssue } from './config/load.ts';

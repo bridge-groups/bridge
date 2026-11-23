@@ -141,6 +141,13 @@ A `budget_usd` policy caps what a conversation may spend: each turn starts with 
 it as `--max-budget-usd`), and a turn starts only when that covers the agent's cheapest recent turn. Codex reports
 tokens, not dollars, so budgets don't limit `codex` agents.
 
+Someone outside `people:` (or with trust `external`) also has a limit of their own across all their conversations
+and the agents those delegate to, so a new thread brings no fresh budget: `defaults.external_budget`, $2 per rolling
+24 hours unless set (`off` lifts it). Their turns run one at a time and each gets at most what they have left. Over
+the limit they are told once, with no amounts, roughly when to try again; their further messages are dropped until
+then, and the owners get one DM. The dashboard and `bridge status` (`externalSpend`) show what each such sender
+spent in the window.
+
 When a turn is stopped or the bridge shuts down, the agent and the commands it runs get SIGTERM and, 5 seconds later,
 SIGKILL (a process an agent deliberately detached, such as `nohup … &`, is not tracked). A turn cut off by a restart
 resumes in the same agent session, at most twice.
@@ -230,8 +237,6 @@ tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` sho
 
 - Telegram tested against the real service
 - An A2A server: bridge agents reachable by other A2A clients (the bridge is an A2A client today)
-- A spending limit per sender outside `people:` (today the budget is per conversation, so a new thread starts a
-  fresh one)
 - A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP
   events, per-user isolation and limits, agents that run user code in sandboxes
 

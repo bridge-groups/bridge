@@ -699,6 +699,35 @@
               "type": "string"
             }
           ]
+        },
+        "external_budget": {
+          "default": {
+            "usd": 2,
+            "per": "24h"
+          },
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "off"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "usd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "per": {
+                  "default": "24h",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "usd"
+              ],
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "additionalProperties": false

@@ -110,6 +110,7 @@ button:disabled { opacity: .5; cursor: default; }
     <section id="ims-down" hidden><h2>IM not connected <span class="count" id="ims-down-count"></span></h2><div id="ims-down-list"></div></section>
     <section id="approvals" hidden><h2>Waiting for you <span class="count" id="approvals-count"></span></h2><div id="approvals-list"></div></section>
     <section><h2>Conversations <span class="count" id="sessions-count"></span></h2><div id="sessions"></div></section>
+    <section id="external" hidden><h2><span id="external-title">Spending by people outside people:</span> <span class="count" id="external-count"></span></h2><div id="external-list"></div></section>
     <section><h2>Tool servers <span class="spacer"></span><button id="tools-refresh">Check</button></h2><div id="tools"><div class="empty">Checking…</div></div></section>
   </div>
   <div>
@@ -209,6 +210,23 @@ button:disabled { opacity: .5; cursor: default; }
         ]),
       ]));
     });
+    // What each sender outside people: spent in the current external_budget window, and who is over it.
+    var ext = s.externalSpend;
+    $('external').hidden = !ext || !ext.senders.length;
+    if (ext) {
+      $('external-title').textContent = 'Outside people: last ' + ext.per + ', limit ' + money(ext.limitUsd) + ' each';
+      $('external-count').textContent = ext.senders.length;
+      var list = clear($('external-list'));
+      ext.senders.forEach(function (x) {
+        list.appendChild(el('div', { class: 'row' }, [
+          el('div', { class: 'main' }, [
+            el('div', { class: 'title', text: x.sender }),
+            el('div', { class: 'sub', text: money(x.spentUsd) + ' of ' + money(ext.limitUsd) +
+              (x.limitedUntil ? ' · over the limit, messages dropped until ' + clock(x.limitedUntil) : '') }),
+          ]),
+        ]));
+      });
+    }
     $('uptime').textContent = s.startedAt ? 'up ' + ago(s.startedAt).replace(' ago', '') : 'starting';
     $('updated').textContent = 'updated ' + clock(Date.now());
   }
@@ -342,6 +360,8 @@ button:disabled { opacity: .5; cursor: default; }
       if (kind === 'ignored') return { text: d.text, note: 'no route' };
       if (kind === 'command') return { text: d.command };
       if (kind === 'config') return { text: d.outcome + ' ' + d.sha + (d.by ? ' by ' + d.by : ''), raw: (d.changes || []).map(changeLine).join('\n') };
+      if (kind === 'budget' && d.dropped) return { text: 'message dropped: ' + d.sender + ' is over the limit for people outside people:' };
+      if (kind === 'budget' && d.sender) return { text: 'turn not started: ' + d.sender + ' spent ' + money(d.spentUsd) + ' of ' + money(d.limitUsd) + ' per ' + d.per + (d.cheapestTurnUsd != null ? ', cheapest recent turn ' + money(d.cheapestTurnUsd) : '') };
       if (kind === 'budget') return { text: 'turn not started: ' + money(d.leftUsd) + ' of ' + money(d.budgetUsd) + ' left' + (d.cheapestTurnUsd != null ? ', cheapest recent turn ' + money(d.cheapestTurnUsd) : '') };
       if (kind === 'error') return { text: d.message || detail };
     }

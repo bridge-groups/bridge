@@ -39,6 +39,14 @@ interface TurnCtx {
   controller: AbortController;
 }
 
+interface TurnOpts {
+  onProgress?: (l: string) => void;
+  /** A delegated turn ends with the turn that delegated it. */
+  parent?: AbortSignal;
+  /** The turn was cut off by a restart and runs again. */
+  resume?: boolean;
+}
+
 interface Job {
   sessionKey: string;
   agent: string;
@@ -153,6 +161,14 @@ export interface SessionInfo {
   branch?: string;
   /** The branch has commits that can be squash-merged now. */
   canMerge?: boolean;
+}
+
+/** What senders outside `people` spent in the current `defaults.external_budget` window, most first. */
+export interface ExternalSpend {
+  limitUsd: number;
+  per: string;
+  /** "platform:userId"; `limitedUntil` while they are over the limit and their messages are dropped. */
+  senders: { sender: string; spentUsd: number; limitedUntil?: number }[];
 }
 
 /** One audit trail entry; `detail` is redacted JSON. */
@@ -282,6 +298,10 @@ export class Bridge implements HubBackend {
   private readonly branchCache = new Map<string, { at: number; branch?: string; canMerge: boolean }>();
   /** When each sender outside `people` was last told the bot does not answer them, by "platform:userId". */
   private readonly strangerNotes = new Map<string, number>();
+  /** Senders outside `people` over their external budget, until when; their messages are dropped meanwhile. */
+  private readonly overLimit = new Map<string, number>();
+  /** Per sender outside `people`: the end of their queue of turns (see invoke). */
+  private readonly strangerTurns = new Map<string, Promise<void>>();
   readonly oauth: OAuthFlows;
   private startedAt = 0;
   private readonly tempDir: string;
@@ -648,6 +668,12 @@ export class Bridge implements HubBackend {
     }
 
     const trust: TrustLevel = person?.trust ?? 'external';
+    const limitedUntil = trust === 'external' ? this.overLimit.get(senderId) : undefined;
+    if (limitedUntil !== undefined && limitedUntil > Date.now() && this.cfg.defaults.external_budget !== 'off') {
+      // Told once when the limit was reached; answering every further message would only invite more.
+      this.trace(key, 'budget', senderId, { sender: senderId, dropped: true, reopensAt: limitedUntil });
+      return;
+    }
     const budgetUsd = this.policies.budgetUsd(match.agent);
     this.trace(key, 'inbound', senderId, { route: match.index, agent: match.agent, text: match.text });
     // Something is already running (or waiting) in this conversation: this message waits its turn, and says so
@@ -980,27 +1006,43 @@ export class Bridge implements HubBackend {
     ].join('\n');
   }
 
+  /**
+   * Run one agent turn. The turns a sender outside `people` starts run one at a time across all their
+   * conversations, so each starts knowing what the ones before it cost and parallel threads cannot overrun their
+   * external budget; turns they delegate run inside theirs.
+   */
+  private async invoke(turn: Omit<TurnCtx, 'controller'>, text: string, agentSessionId: string | undefined, opts: TurnOpts = {}): Promise<AgentReply> {
+    const limited = !opts.parent && turn.envelope.trust === 'external' && this.cfg.defaults.external_budget !== 'off';
+    if (!limited) return this.runTurn(turn, text, agentSessionId, opts);
+    const sender = turn.envelope.initiator;
+    const before = this.strangerTurns.get(sender) ?? Promise.resolve();
+    const mine = Promise.withResolvers<void>();
+    const tail = before.then(() => mine.promise);
+    this.strangerTurns.set(sender, tail);
+    try {
+      await before;
+      if (this.stopping) throw new Error('the bridge is shutting down');
+      return await this.runTurn(turn, text, agentSessionId, opts);
+    } finally {
+      mine.resolve();
+      if (this.strangerTurns.get(sender) === tail) this.strangerTurns.delete(sender);
+    }
+  }
+
   /** Run one agent turn with a session-scoped MCP grant. */
-  private async invoke(
-    turn: Omit<TurnCtx, 'controller'>,
-    text: string,
-    agentSessionId: string | undefined,
-    opts: {
-      onProgress?: (l: string) => void;
-      /** A delegated turn ends with the turn that delegated it. */
-      parent?: AbortSignal;
-      /** The turn was cut off by a restart and runs again. */
-      resume?: boolean;
-    } = {},
-  ): Promise<AgentReply> {
+  private async runTurn(turn: Omit<TurnCtx, 'controller'>, text: string, agentSessionId: string | undefined, opts: TurnOpts): Promise<AgentReply> {
     const adapter = this.agent(turn.agent);
     const ctx: TurnCtx = { ...turn, controller: new AbortController() };
-    const budgetUsd = await this.remainingBudget(ctx);
-    const refusal = await this.budgetRefusal(ctx, budgetUsd);
+    const conversationLeft = await this.remainingBudget(ctx);
+    const allowance = await this.allowance(ctx.envelope);
+    const refusal = await this.budgetRefusal(ctx, conversationLeft, allowance);
     if (refusal) {
       this.trace(ctx.sessionKey, 'budget', ctx.agent, refusal.detail);
+      if (refusal.limited && allowance) this.limitReached(refusal.limited, allowance);
       throw refusal;
     }
+    const budgets = [conversationLeft, allowance?.left].filter((n): n is number => n !== undefined);
+    const budgetUsd = budgets.length ? Math.min(...budgets) : undefined;
     if (opts.parent?.aborted) throw new Error('the delegating turn has ended');
     const endWithParent = () => ctx.controller.abort();
     opts.parent?.addEventListener('abort', endWithParent, { once: true });
@@ -1028,6 +1070,7 @@ export class Bridge implements HubBackend {
       await this.flushWrites();
       await this.store.updateSession(ctx.sessionKey, { agentSession: { agent: ctx.agent, id: reply.agentSessionId ?? null } });
       if (reply.costUsd) await this.store.updateSession(ctx.rootKey, { addSpentUsd: reply.costUsd });
+      if (reply.costUsd && allowance) await this.store.addSpending(allowance.sender, reply.costUsd);
       this.trace(ctx.sessionKey, 'reply', ctx.agent, { text: reply.text, costUsd: reply.costUsd });
       return reply;
     } finally {
@@ -1106,6 +1149,7 @@ export class Bridge implements HubBackend {
       const removed = await this.store.prune({
         queueBefore: now - parseDuration(defaults.offline_queue_ttl),
         historyBefore: defaults.retention === 'off' ? undefined : now - parseDuration(defaults.retention),
+        spendingBefore: defaults.external_budget === 'off' ? undefined : now - parseDuration(defaults.external_budget.per),
       });
       if (removed.trace || removed.sessions) this.log(`housekeeping: removed ${removed.trace} trace entries, ${removed.sessions} idle sessions`);
     });
@@ -1143,11 +1187,26 @@ export class Bridge implements HubBackend {
   }
 
   /**
-   * Whether a turn may start with what is left of the conversation budget. An agent's spending cap is only
-   * checked between model requests, so a turn started with less than one request costs overshoots the budget;
-   * a turn starts only when at least the agent's cheapest recent turn is left.
+   * What the sender who began this chain may still spend when their trust is `external` (outside `people`, or listed
+   * so); undefined for anyone else or when off.
    */
-  private async budgetRefusal(ctx: TurnCtx, left: number | undefined): Promise<BudgetRefusal | undefined> {
+  private async allowance(envelope: Envelope): Promise<Allowance | undefined> {
+    const limit = this.cfg.defaults.external_budget;
+    if (limit === 'off' || envelope.trust !== 'external') return undefined;
+    const perMs = parseDuration(limit.per);
+    const rows = await this.store.spendingSince(envelope.initiator, Date.now() - perMs);
+    const spent = rows.reduce((n, r) => n + r.usd, 0);
+    return { sender: envelope.initiator, usd: limit.usd, per: limit.per, perMs, rows, spent, left: Math.max(0, limit.usd - spent) };
+  }
+
+  /**
+   * Whether a turn may start with what is left of the conversation budget and of the sender's external budget,
+   * whichever is less. An agent's spending cap is only checked between model requests, so a turn started with
+   * less than one request costs overshoots the budget; a turn starts only when at least the agent's cheapest
+   * recent turn is left.
+   */
+  private async budgetRefusal(ctx: TurnCtx, left: number | undefined, allowance: Allowance | undefined): Promise<BudgetRefusal | undefined> {
+    if (allowance && (left === undefined || allowance.left <= left)) return this.limitRefusal(ctx, allowance);
     const budget = ctx.envelope.budgetUsd;
     if (budget === undefined || left === undefined) return undefined;
     const reset = 'Send "reset" to start a new conversation with a fresh budget.';
@@ -1157,8 +1216,7 @@ export class Bridge implements HubBackend {
         leftUsd: 0,
       });
     }
-    await this.flushWrites(); // the replies of earlier turns are in the audit trail
-    const floor = await this.store.cheapestRecentTurn(ctx.agent);
+    const floor = await this.cheapestTurn(ctx.agent);
     if (floor !== undefined && left < floor) {
       return new BudgetRefusal(
         `${ctx.agent} needs more than the $${left.toFixed(2)} left of this conversation's $${budget} budget (its cheapest recent turn cost $${floor.toFixed(2)}). ${reset}`,
@@ -1166,6 +1224,63 @@ export class Bridge implements HubBackend {
       );
     }
     return undefined;
+  }
+
+  /**
+   * The external budget binds: the turn starts if what is left covers the agent's cheapest recent turn. The
+   * sender hears only that they are over a limit and roughly when they can try again, nothing of the setup.
+   */
+  private async limitRefusal(ctx: TurnCtx, a: Allowance): Promise<BudgetRefusal | undefined> {
+    const floor = a.left > 0 ? await this.cheapestTurn(ctx.agent) : undefined;
+    if (a.left > 0 && (floor === undefined || a.left >= floor)) return undefined;
+    const reopens = reopensAt(a, floor ?? 0);
+    const now = Date.now();
+    const when = reopens === undefined ? 'later' : `in about ${duration(Math.max(reopens - now, 60e3))}`;
+    const detail: Record<string, number | string> = { sender: a.sender, limitUsd: a.usd, per: a.per, spentUsd: a.spent, leftUsd: a.left };
+    if (floor !== undefined) detail.cheapestTurnUsd = floor;
+    if (reopens !== undefined) detail.reopensAt = reopens;
+    return new BudgetRefusal(`You've reached the usage limit for now. Try again ${when}.`, detail, {
+      sender: a.sender,
+      until: reopens ?? now + a.perMs,
+    });
+  }
+
+  /** The agent's cheapest recent turn, with the replies of earlier turns already in the audit trail. */
+  private async cheapestTurn(agent: string): Promise<number | undefined> {
+    await this.flushWrites();
+    return this.store.cheapestRecentTurn(agent);
+  }
+
+  /**
+   * A sender outside `people` reached their external budget: until it reopens their further messages are dropped
+   * without an answer (this refusal told them once), and the owners hear of it once.
+   */
+  private limitReached(limited: { sender: string; until: number }, a: Allowance) {
+    const now = Date.now();
+    for (const [k, until] of this.overLimit) if (until <= now) this.overLimit.delete(k);
+    const told = this.overLimit.has(limited.sender);
+    this.overLimit.set(limited.sender, limited.until);
+    if (told) return;
+    this.tellOwners(
+      `💸 ${limited.sender} (trust external) reached the $${a.usd} per ${a.per} limit (defaults.external_budget). ` +
+        `Their messages are not passed on for about ${duration(Math.max(limited.until - now, 60e3))}; list them in people: with more trust to lift it.`,
+    );
+  }
+
+  /** Senders outside `people` with spending in the current external-budget window, for the status page. */
+  private async externalSpend(): Promise<ExternalSpend | undefined> {
+    const limit = this.cfg.defaults.external_budget;
+    if (limit === 'off') return undefined;
+    const now = Date.now();
+    const senders = await this.store.spendersSince(now - parseDuration(limit.per));
+    return {
+      limitUsd: limit.usd,
+      per: limit.per,
+      senders: senders.map(({ sender, usd }) => {
+        const until = this.overLimit.get(sender);
+        return until !== undefined && until > now ? { sender, spentUsd: usd, limitedUntil: until } : { sender, spentUsd: usd };
+      }),
+    };
   }
 
   // ───────────────────────── state writes ─────────────────────────
@@ -1473,6 +1588,7 @@ export class Bridge implements HubBackend {
       tools: Object.keys(this.cfg.tools),
       activeTurns: [...this.active.values()].map((c) => ({ session: c.sessionKey, agent: c.agent })),
       sessions: (await this.store.listSessions(20)).map((s) => ({ key: s.key, agent: s.agent, lastActive: s.last_active, spentUsd: s.spent_usd })),
+      externalSpend: await this.externalSpend(),
     };
   }
 
@@ -1948,11 +2064,43 @@ export function split(text: string, max: number): string[] {
 
 /** A turn not started because the conversation budget can't cover it; `detail` goes to the audit trail. */
 class BudgetRefusal extends Error {
-  readonly detail: Record<string, number>;
-  constructor(message: string, detail: Record<string, number>) {
+  readonly detail: Record<string, number | string>;
+  /** Set when the sender's external budget, not the conversation's, stopped the turn. */
+  readonly limited?: { sender: string; until: number };
+  constructor(message: string, detail: Record<string, number | string>, limited?: { sender: string; until: number }) {
     super(message);
     this.detail = detail;
+    this.limited = limited;
   }
+}
+
+/** What a sender outside `people` may still spend (`defaults.external_budget`), and what they spent in the window. */
+interface Allowance {
+  sender: string;
+  usd: number;
+  per: string;
+  perMs: number;
+  /** Oldest first, within the window. */
+  rows: { ts: number; usd: number }[];
+  spent: number;
+  left: number;
+}
+
+/**
+ * When a sender over their rolling-window limit can next start a turn needing `need`: the time the oldest spending
+ * that has to fall out of the window does. Undefined when `need` exceeds the whole limit.
+ */
+function reopensAt(a: Allowance, need: number): number | undefined {
+  if (need > a.usd) return undefined;
+  let spent = a.spent;
+  for (const r of a.rows) {
+    spent -= r.usd;
+    const left = a.usd - spent;
+    if (left > 0 && left >= need) return r.ts + a.perMs;
+  }
+  // Only float rounding gets here: once everything in the window has fallen out, the whole limit is left.
+  const last = a.rows.at(-1);
+  return last ? last.ts + a.perMs : Date.now();
 }
 
 /** `text` on one line, cut to `max` characters. */

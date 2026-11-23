@@ -40,7 +40,7 @@ What widens access:
 | A person, agent, tool server or IM connection is added or changed | A new id, command, URL or token reaches further |
 | For an agent or tool server, only a setting that can reach further | `description`, `timeout` and `model` never do; `permission_mode` and `sandbox` only toward more access; `allowed_tools` only with a new tool; `worktree` only when turned off. Anything else (`command`, `cwd`, `url`, `headers`, `env`, …) does |
 | A policy is removed or changed, or a new policy names approvers | An approval or limit is lifted, or more people may approve |
-| `defaults.max_hops` goes up, or `server.host` changes | Delegation goes further, or the dashboard listens beyond this machine |
+| `defaults.max_hops` goes up, `defaults.external_budget` loosens (more `usd`, a shorter `per`, or `off`), or `server.host` changes | Delegation goes further, strangers may spend more, or the dashboard listens beyond this machine |
 
 Removals and new limits apply at once, and so do housekeeping settings such as `progress`, `retention` and the
 other `defaults`.
@@ -96,6 +96,14 @@ A message reaches an agent only through a route (deny by default).
   may write (not marked read-only) and each `delegate` waits for an owner (`timeout` 10m unless a matching policy
   sets one). Matching policies still add their approvers. Read-only tools, `send_message` and `ask_human` run as usual.
 - `budget_usd` is per conversation; a conversation deleted by `retention` starts with a fresh budget.
+- `defaults.external_budget` (`{ usd, per }`, default `{ usd: 2, per: 24h }`; `off` for none) caps what one sender
+  outside `people:` (or listed with trust `external`) spends in any rolling `per` window, counted by IM account
+  (`slack:U0123`, or the person id) across all their
+  conversations and the agents they delegate to. Each turn gets the lesser of this and the conversation's budget,
+  and starts only when that covers the agent's cheapest recent turn. Their turns run one at a time, so parallel
+  threads can't overrun it. Over the limit they hear only "You've reached the usage limit for now. Try again in
+  about …", once; until then their messages are dropped (each logged as `budget` in the audit trail) and the owners
+  get one DM. After a restart that "once" starts over: one more message is refused and reported.
 
 ## Rules a check enforces
 
@@ -135,7 +143,7 @@ mentioned); `text` defaults to `hello`. To see why a message routes the way it d
 | `tools` | `<name>: { command, args, env }` or `{ url, headers, oauth }` | MCP tool servers; `oauth: true` signs in with `bridge auth <name>` |
 | `routes` | `{ from, when, to }` | `from`: an IM address or an agent. `when`: `mention`, `sender`. `to`: one agent (from IM), or agents and `server.tool` globs (from an agent) |
 | `policies` | `{ match: { tool, agent, writes }, approve_by, timeout, max_hops, budget_usd }` | Every key of `match` must hold; all applying policies count and the strictest wins |
-| `defaults` | `dm_idle_reset`, `offline_queue_ttl`, `progress`, `max_hops`, `max_file_mb`, `files_ttl`, `worktree_prune_after`, `retention` | Housekeeping and limits |
+| `defaults` | `dm_idle_reset`, `offline_queue_ttl`, `progress`, `max_hops`, `max_file_mb`, `files_ttl`, `worktree_prune_after`, `retention`, `external_budget` | Housekeeping and limits |
 | `server` | `host`, `port`, `data_dir` | The dashboard and MCP hub listen on `host:port`; the database is in `data_dir` (default `~/.bridge`; a relative path is from the config file's folder) |
 | `tests` | Assertions, see above | |
 

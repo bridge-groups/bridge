@@ -65,9 +65,19 @@ export interface BridgeStore {
    * marked by this call are returned too, with status `expired`, so the bridge can tell their senders.
    */
   takePending(ttlMs: number): Awaitable<QueueRow[]>;
-  prune(opts: { queueBefore: number; historyBefore?: number }): Awaitable<{ queue: number; trace: number; sessions: number }>;
+  /**
+   * Retention: finished queue rows created before `queueBefore`; trace entries and conversations idle since before
+   * `historyBefore`; spending recorded before `spendingBefore` (omit either to keep those).
+   */
+  prune(opts: { queueBefore: number; historyBefore?: number; spendingBefore?: number }): Awaitable<{ queue: number; trace: number; sessions: number }>;
   /** Append to the audit trail. `detail` is JSON the bridge has already cleared of credentials. */
   trace(sessionKey: string, kind: string, actor: string, detail: string): Awaitable<void>;
+  /** Record what a turn begun by `sender` (someone outside `people`, as "platform:userId") cost. */
+  addSpending(sender: string, usd: number): Awaitable<void>;
+  /** What `sender` spent since `since`, oldest first. */
+  spendingSince(sender: string, since: number): Awaitable<{ ts: number; usd: number }[]>;
+  /** Each sender's total since `since`, highest first. */
+  spendersSince(since: number, limit?: number): Awaitable<{ sender: string; usd: number }[]>;
   /** The cheapest of `agent`'s last 20 replies that reported a cost (`kind: reply`, `detail.costUsd`). */
   cheapestRecentTurn(agent: string): Awaitable<number | undefined>;
   /** Oldest first: the last `limit` entries, of one conversation or of all, of the given kinds or of every kind. */
@@ -104,6 +114,10 @@ export class SqliteStore implements BridgeStore {
       CREATE INDEX IF NOT EXISTS trace_session ON trace(session_key, id);
       CREATE INDEX IF NOT EXISTS trace_ts ON trace(ts);
       CREATE INDEX IF NOT EXISTS sessions_active ON sessions(last_active);
+      -- What turns begun by senders outside people cost, for their limit over a rolling window.
+      CREATE TABLE IF NOT EXISTS spending (ts INTEGER NOT NULL, sender TEXT NOT NULL, usd REAL NOT NULL);
+      CREATE INDEX IF NOT EXISTS spending_sender ON spending(sender, ts);
+      CREATE INDEX IF NOT EXISTS spending_ts ON spending(ts);
       CREATE TABLE IF NOT EXISTS agent_sessions (
         session_key TEXT NOT NULL, agent TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (session_key, agent)
       );
@@ -205,14 +219,12 @@ export class SqliteStore implements BridgeStore {
     return [...expired, ...live].sort((a, b) => a.created_at - b.created_at);
   }
 
-  /**
-   * Retention: finished queue rows created before `queueBefore`; trace entries and sessions idle since before
-   * `historyBefore` (omit to keep them). Returns how many rows went.
-   */
-  prune(opts: { queueBefore: number; historyBefore?: number }): { queue: number; trace: number; sessions: number } {
+  /** See BridgeStore.prune. Returns how many queue rows, trace entries and sessions went. */
+  prune(opts: { queueBefore: number; historyBefore?: number; spendingBefore?: number }): { queue: number; trace: number; sessions: number } {
     const queue = this.db
       .prepare(`DELETE FROM queue WHERE status IN ('done', 'failed', 'expired') AND created_at < ?`)
       .run(opts.queueBefore).changes;
+    if (opts.spendingBefore !== undefined) this.db.prepare('DELETE FROM spending WHERE ts < ?').run(opts.spendingBefore);
     if (opts.historyBefore === undefined) return { queue: Number(queue), trace: 0, sessions: 0 };
     const trace = this.db.prepare('DELETE FROM trace WHERE ts < ?').run(opts.historyBefore).changes;
     const sessions = this.db.prepare('DELETE FROM sessions WHERE last_active < ?').run(opts.historyBefore).changes;
@@ -224,6 +236,22 @@ export class SqliteStore implements BridgeStore {
     this.db
       .prepare('INSERT INTO trace (ts, session_key, kind, actor, detail) VALUES (?, ?, ?, ?, ?)')
       .run(Date.now(), sessionKey, kind, actor, detail);
+  }
+
+  addSpending(sender: string, usd: number) {
+    this.db.prepare('INSERT INTO spending (ts, sender, usd) VALUES (?, ?, ?)').run(Date.now(), sender, usd);
+  }
+
+  spendingSince(sender: string, since: number): { ts: number; usd: number }[] {
+    return this.db
+      .prepare('SELECT ts, usd FROM spending WHERE sender = ? AND ts >= ? ORDER BY ts')
+      .all(sender, since) as unknown as { ts: number; usd: number }[];
+  }
+
+  spendersSince(since: number, limit = 20): { sender: string; usd: number }[] {
+    return this.db
+      .prepare('SELECT sender, SUM(usd) AS usd FROM spending WHERE ts >= ? GROUP BY sender ORDER BY usd DESC LIMIT ?')
+      .all(since, limit) as unknown as { sender: string; usd: number }[];
   }
 
   /**

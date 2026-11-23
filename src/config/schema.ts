@@ -262,6 +262,13 @@ const Defaults = z
     worktree_prune_after: z.union([z.literal('off'), Duration]).default('7d'),
     /** Trace entries and conversations idle for longer than this are deleted ("off" to keep them forever). */
     retention: z.union([z.literal('off'), Duration]).default('30d'),
+    /**
+     * What one sender outside `people` (one IM account) may spend across all conversations and agents in a rolling
+     * window ("off": no limit beyond the conversation budgets).
+     */
+    external_budget: z
+      .union([z.literal('off'), z.strictObject({ usd: z.number().positive(), per: Duration.default('24h') })])
+      .default({ usd: 2, per: '24h' }),
   })
   .strict()
   .prefault({});

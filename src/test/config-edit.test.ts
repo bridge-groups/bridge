@@ -129,6 +129,10 @@ test('changes: new reach widens access, removed reach does not', () => {
   assert.ok(!quiet(`${BASE}  - { match: { tool: "gh.*" }, approve_by: [bob] }\n`), 'a new approver widens');
   assert.ok(quiet(`${BASE}defaults: { progress: verbose }\n`), 'housekeeping');
   assert.ok(!quiet(`${BASE}defaults: { max_hops: 9 }\n`), 'more hops widen');
+  assert.ok(quiet(`${BASE}defaults: { external_budget: { usd: 1, per: 2d } }\n`), 'a tighter external budget');
+  assert.ok(!quiet(`${BASE}defaults: { external_budget: { usd: 5 } }\n`), 'a larger external budget widens');
+  assert.ok(!quiet(`${BASE}defaults: { external_budget: { usd: 2, per: 1h } }\n`), 'a shorter window widens');
+  assert.ok(!quiet(`${BASE}defaults: { external_budget: off }\n`), 'no external budget widens');
   assert.ok(!quiet(BASE.replace('server: { port: 0 }', 'server: { port: 0, host: 0.0.0.0 }')), 'a public listener widens');
 });
 

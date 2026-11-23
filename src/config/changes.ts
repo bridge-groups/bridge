@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { BridgeConfig, Policy, Route } from './schema.ts';
+import { parseDuration } from '../core/address.ts';
 
 /** One difference between the running config and a new one. */
 export interface ConfigChange {
@@ -56,9 +57,12 @@ export function configChanges(prev: BridgeConfig, next: BridgeConfig): ConfigCha
     if (prev.server[key] !== next.server[key]) out.push({ section: 'server', key, kind: 'changed', widens: false });
   }
   for (const key of Object.keys(next.defaults) as (keyof BridgeConfig['defaults'])[]) {
-    if (prev.defaults[key] === next.defaults[key]) continue;
-    // More hops lets a request travel further through delegation; the other defaults are housekeeping.
-    const widens = key === 'max_hops' && next.defaults.max_hops > prev.defaults.max_hops;
+    if (isDeepStrictEqual(prev.defaults[key], next.defaults[key])) continue;
+    // More hops lets a request travel further through delegation, a looser external budget lets strangers spend
+    // more; the other defaults are housekeeping.
+    const widens =
+      (key === 'max_hops' && next.defaults.max_hops > prev.defaults.max_hops) ||
+      (key === 'external_budget' && !tightens(prev.defaults.external_budget, next.defaults.external_budget));
     out.push({ section: 'defaults', key, kind: 'changed', widens });
   }
   if (!isDeepStrictEqual(prev.tests, next.tests)) out.push({ section: 'tests', key: 'tests', kind: 'changed', widens: false });
@@ -132,4 +136,11 @@ export function describeChanges(changes: ConfigChange[]): string[] {
   return changes.map(
     (c) => `${c.widens ? '+' : c.kind === 'removed' ? '-' : '~'} ${c.section} ${c.kind}: ${c.key}${c.fields?.length ? ` (${c.fields.join(', ')})` : ''}`,
   );
+}
+
+/** Whether a new external budget lets no sender spend more in any stretch of time than the old one did. */
+function tightens(prev: BridgeConfig['defaults']['external_budget'], next: BridgeConfig['defaults']['external_budget']): boolean {
+  if (next === 'off') return false;
+  if (prev === 'off') return true;
+  return next.usd <= prev.usd && parseDuration(next.per) >= parseDuration(prev.per);
 }
