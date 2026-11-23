@@ -5,8 +5,8 @@ Discord or Telegram reach agents such as Claude Code or Codex; each agent turn c
 another agent and call the tool servers its routes allow; policies decide approvals and budgets; everything lands
 in an audit trail with secrets redacted.
 
-- **IM**: Slack (Socket Mode) and Feishu / Lark (long connection), both outbound, so you need no public URL.
-  Discord (Gateway WebSocket) and Telegram (long polling) are written but not yet tested against the real services.
+- **IM**: Slack (Socket Mode), Feishu / Lark (long connection) and Discord (Gateway WebSocket), all outbound, so you
+  need no public URL. Telegram (long polling) is written but not yet tested against the real service.
 - **Tools**: MCP servers, local or remote. The bridge holds the credentials and gives each agent only what its
   routes allow.
 - **Agents**: Claude Code (`claude -p`), Codex (`codex exec`), any HTTP webhook, remote agents speaking A2A, or any
@@ -228,7 +228,7 @@ tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` sho
 
 ## Not in v0.1 yet
 
-- Discord and Telegram tested against the real services
+- Telegram tested against the real service
 - An A2A server: bridge agents reachable by other A2A clients (the bridge is an A2A client today)
 - A spending limit per sender outside `people:` (today the budget is per conversation, so a new thread starts a
   fresh one)
