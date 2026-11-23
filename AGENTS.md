@@ -87,7 +87,7 @@ User-facing docs are in [README.md](README.md); design notes and references live
   terminal (`bridge chat`). The owner's own IM accounts, keychain and `~/.bridge` are used only when they ask.
   Nothing that tests GitHub (pushing a conversation branch, `pr`, issues or comments through a GitHub tool server)
   runs against this repository (`bridge-groups/bridge`): such checks use the test repository
-  `continuationcs/bridge`, which holds an old copy of this code and nothing else depends on.
+  `continuationcs/bridge`, which holds only a README and nothing else depends on.
 
 ## Code health comes first
 
