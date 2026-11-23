@@ -6,6 +6,8 @@ import type { ImAdapter, OutboundMessage } from './types.ts';
 export class LocalConsoleAdapter implements ImAdapter {
   readonly platform = 'local';
   readonly maxTextLength = 100_000;
+  /** Nothing can be typed while the bridge is not running. */
+  readonly replaysMissed = true;
   private readonly as: string;
   private rl?: Interface;
   private n = 0;

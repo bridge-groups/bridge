@@ -19,6 +19,11 @@ export interface InboundMessage {
   messageId: string;
   /** Attachments; the bridge downloads them when the turn runs. */
   files?: InboundFile[];
+  /**
+   * What the message held that the adapter cannot pass on, such as "a sticker" (reads after "I can't read"). With
+   * no text or files besides, the message never reaches an agent; the sender hears why when they addressed the bot.
+   */
+  unreadable?: string;
 }
 
 export interface InboundFile {
@@ -41,6 +46,13 @@ export interface Explanation {
   match?: InboundMatch;
   /** One line per route that was checked, in order. */
   trace: string[];
+  /**
+   * Without a match: the agents whose routes take messages from this sender on this IM and channel, so only
+   * how the message was addressed (a missing or other agent name, no mention) kept them from matching.
+   */
+  reachable: string[];
+  /** The agent named at the start of the message, if any. */
+  addressed?: string;
 }
 
 export interface InboundContext {
@@ -66,6 +78,7 @@ export class Router {
   /** First-match routing for messages from IM, with a reason for every route that did not match. */
   explainInbound(msg: InboundMessage, ctx: InboundContext): Explanation {
     const trace: string[] = [];
+    const reachable = new Set<string>();
     const { agent: addressed, rest } = this.leadingAgent(msg.text);
     const target = (route: Route) => (Array.isArray(route.to) ? route.to[0]! : route.to);
 
@@ -92,6 +105,9 @@ export class Router {
         trace.push(`${label}: channel does not match`);
         continue;
       }
+      const sender = route.when.sender;
+      const senderAllowed = !Array.isArray(sender) || (ctx.personId !== undefined && sender.includes(ctx.personId));
+      if (senderAllowed) reachable.add(agent);
       if (addressed && addressed !== agent) {
         trace.push(`${label}: message addresses "${addressed}"`);
         continue;
@@ -108,16 +124,15 @@ export class Router {
         trace.push(`${label}: message does not address "${mention}" (start it with "${mention}")`);
         continue;
       }
-      const sender = route.when.sender;
-      if (Array.isArray(sender) && !(ctx.personId && sender.includes(ctx.personId))) {
+      if (!senderAllowed) {
         trace.push(`${label}: sender ${ctx.personId ?? `unknown (${msg.platform}:${msg.userId})`} not allowed`);
         continue;
       }
       trace.push(`${label}: MATCH`);
-      return { trace, match: { route, index, agent, text: addressed ? rest : msg.text } };
+      return { trace, reachable: [], addressed, match: { route, index, agent, text: addressed ? rest : msg.text } };
     }
     trace.push('no route matched — message ignored (deny by default)');
-    return { trace };
+    return { trace, reachable: [...reachable], addressed };
   }
 
   /** May agent `from` reach `target` (another agent, or a tool as "server.tool")? */

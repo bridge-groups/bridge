@@ -54,7 +54,9 @@ await bridge.start();
   trail. Its methods may return promises, so it can live in your database; `SqliteStore` is the default. A
   conversation records the agent holding it; each agent's own session id in it is kept apart (`agentSession`, and
   `updateSession` with `agentSession`), so switching agents and back resumes each one's session. `deleteSession` and
-  `prune` remove those ids with their conversation.
+  `prune` remove those ids with their conversation. `takePending` also returns the entries it has just expired
+  (status `expired`), so their threads hear the message was dropped. The audit trail's newest entry tells the next
+  start how long the bridge was away (`kind: bridge` with `state: stopped` after a clean stop).
 - **Temporary files.** Attachments and agents' scratch files go under `tempDir` (default: `bridge` in the OS temp
   folder), which the bridge keeps readable by this user only.
 - **OAuth.** Tokens for tool servers that sign in with OAuth go to `oauthStorage` (default: memory, lost on
@@ -71,6 +73,9 @@ await bridge.start();
   third callback (`LinkChange`): the IM is `reconnecting` (sending still works, nothing is queued), the owners are
   told once it has lasted `imQuietMs` (default 5 min) and when it is back, and whenever the adapter says messages
   since some time may be lost (`missedSince`).
+- **IM adapters.** An adapter passes on a person's message it can't read (a sticker) with `unreadable` set and no
+  text, so the bridge can tell the sender; it never reaches an agent. An adapter whose platform delivers messages sent
+  while the bridge was not running sets `replaysMissed`; for the others, the owners are told after a restart.
 - **Log.** `log(line, level)` receives what the bridge reports; `error` marks failures someone should look at
   (default: the console).
 

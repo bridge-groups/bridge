@@ -50,13 +50,16 @@ test('DM rich text with an image: text kept, image becomes a downloadable file',
   assert.equal(msg.threadId, 'om_2', 'a message without root starts its own thread');
 });
 
-test('file messages carry the file name; bots and stickers are ignored', async () => {
+test('file messages carry the file name; bots and join notices are ignored, stickers marked unreadable', async () => {
   const a = adapter();
   const f = await a.parse(event({ message_type: 'file', content: JSON.stringify({ file_key: 'fk', file_name: 'trace.log' }) }));
   assert.equal(f.files[0].name, 'trace.log');
   assert.equal(f.text, '');
   assert.equal(await a.parse({ ...event({ message_type: 'text', content: '{"text":"hi"}' }), sender: { sender_type: 'app' } }), undefined);
-  assert.equal(await a.parse(event({ message_type: 'sticker', content: '{}' })), undefined);
+  assert.equal(await a.parse(event({ message_type: 'system', content: '{}' })), undefined);
+  const sticker = await a.parse(event({ chat_type: 'p2p', message_type: 'sticker', content: '{}' }));
+  assert.deepEqual([sticker.text, sticker.unreadable, sticker.isDM], ['', 'stickers', true]);
+  assert.equal((await a.parse(event({ message_type: 'constructor', content: '{}' }))).unreadable, 'constructor messages');
 });
 
 test('cards: markdown body, buttons carry the choice value, outcome note replaces buttons', () => {

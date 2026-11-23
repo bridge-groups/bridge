@@ -606,3 +606,18 @@ test('discord: a message mentioning the bot role instead of the bot gets a reply
     await dc.close();
   }
 });
+
+test('discord: a sticker is passed on as unreadable, so the bridge can tell the sender', async () => {
+  const dc = await fakeDiscord();
+  const a = new DiscordAdapter({ botToken: 'T', apiBase: dc.apiBase });
+  const got: InboundMessage[] = [];
+  try {
+    await a.start((m) => got.push(m));
+    dc.dispatch('MESSAGE_CREATE', inChannel('1200', '', { guild_id: undefined, channel_id: '20', sticker_items: [{ id: 's' }] }));
+    await until(() => got.length === 1, 'the DM sticker');
+    assert.deepEqual([got[0]!.isDM, got[0]!.text, got[0]!.unreadable], [true, '', 'stickers']);
+  } finally {
+    await a.stop();
+    await dc.close();
+  }
+});

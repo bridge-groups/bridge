@@ -475,11 +475,15 @@ export class DiscordAdapter implements ImAdapter {
     const role = !mentioned && d.guild_id && d.mention_roles?.length ? await this.ownRole(String(d.guild_id), d.mention_roles) : undefined;
     if (role) await this.hintRole(d, role);
     // Without the Message Content intent, messages that don't mention the bot arrive blank.
+    let unreadable: string | undefined;
     if (!text && !files.length) {
       if (role) return this.ignore(d, `mentions the ${role} role, not the app`);
-      if (this.messageContent || !d.guild_id || d.sticker_items?.length) return this.ignore(d, 'no text or files');
-      await this.hintBlank(String(d.channel_id));
-      return this.ignore(d, 'blank: it does not mention the app, and the bot has no Message Content intent');
+      if (!this.messageContent && d.guild_id && !d.sticker_items?.length) {
+        await this.hintBlank(String(d.channel_id));
+        return this.ignore(d, 'blank: it does not mention the app, and the bot has no Message Content intent');
+      }
+      // A sticker, a poll…: the bridge tells the sender when it was meant for the bot.
+      unreadable = d.sticker_items?.length ? 'stickers' : d.poll ? 'polls' : 'messages without text or files';
     }
 
     const isDM = !d.guild_id;
@@ -510,6 +514,7 @@ export class DiscordAdapter implements ImAdapter {
       threadId,
       messageId: String(d.id),
       files,
+      ...(unreadable ? { unreadable } : {}),
     };
   }
 

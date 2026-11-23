@@ -20,7 +20,8 @@ export interface SessionRow {
 
 export interface QueueRow {
   id: string;
-  status: 'pending' | 'running';
+  /** `expired`: `takePending` just gave up on it (see there). */
+  status: 'pending' | 'running' | 'expired';
   session_key: string;
   payload: string;
   created_at: number;
@@ -59,7 +60,10 @@ export interface BridgeStore {
   enqueue(id: string, sessionKey: string, payload: unknown): Awaitable<void>;
   markRunning(id: string, payload: unknown): Awaitable<void>;
   finish(id: string, status: 'done' | 'failed'): Awaitable<void>;
-  /** Queue entries still pending or running, oldest first; older than `ttlMs` ones are marked expired instead. */
+  /**
+   * Queue entries still pending or running, oldest first. Ones older than `ttlMs` are marked expired instead; those
+   * marked by this call are returned too, with status `expired`, so the bridge can tell their senders.
+   */
   takePending(ttlMs: number): Awaitable<QueueRow[]>;
   prune(opts: { queueBefore: number; historyBefore?: number }): Awaitable<{ queue: number; trace: number; sessions: number }>;
   /** Append to the audit trail. `detail` is JSON the bridge has already cleared of credentials. */
@@ -187,14 +191,18 @@ export class SqliteStore implements BridgeStore {
    */
   takePending(ttlMs: number): QueueRow[] {
     const cutoff = Date.now() - ttlMs;
-    this.db
-      .prepare(`UPDATE queue SET status = 'expired' WHERE status IN ('pending', 'running') AND created_at < ?`)
-      .run(cutoff);
-    return this.db
+    const expired = this.db
+      .prepare(
+        `UPDATE queue SET status = 'expired' WHERE status IN ('pending', 'running') AND created_at < ?
+         RETURNING id, status, session_key, payload, created_at`,
+      )
+      .all(cutoff) as unknown as QueueRow[];
+    const live = this.db
       .prepare(
         `SELECT id, status, session_key, payload, created_at FROM queue WHERE status IN ('pending', 'running') ORDER BY created_at`,
       )
       .all() as unknown as QueueRow[];
+    return [...expired, ...live].sort((a, b) => a.created_at - b.created_at);
   }
 
   /**

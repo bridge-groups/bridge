@@ -220,6 +220,8 @@ const PROGRESS_EDIT_MS = 1500;
 /** How long a merge / discard / pr confirmation in the chat waits. */
 const CONFIRM_MS = 10 * 60e3;
 const DENY = /^(deny|denied|no|n|reject|拒绝|不行)$/i;
+/** Someone not in `people` hears at most once per this interval why the bot does not answer them. */
+const STRANGER_NOTE_MS = 24 * 3600e3;
 
 export class Bridge implements HubBackend {
   private cfg: BridgeConfig;
@@ -278,6 +280,8 @@ export class Bridge implements HubBackend {
   private writes: Promise<void> = Promise.resolve();
   /** Dashboard branch status per session key (see BRANCH_CACHE_MS). */
   private readonly branchCache = new Map<string, { at: number; branch?: string; canMerge: boolean }>();
+  /** When each sender outside `people` was last told the bot does not answer them, by "platform:userId". */
+  private readonly strangerNotes = new Map<string, number>();
   readonly oauth: OAuthFlows;
   private startedAt = 0;
   private readonly tempDir: string;
@@ -335,6 +339,8 @@ export class Bridge implements HubBackend {
     privateDir(this.tempDir);
     if (!this.mcpBaseUrl) await this.listen();
     const mcpUrl = this.baseUrl();
+    const downSince = await this.lastRun();
+    this.trace('-', 'bridge', 'bridge', { state: 'started' });
     // Work left over from the last run takes its place in the queues before any new message can;
     // it runs once the IMs are connected (see `ready`).
     await this.replayQueue();
@@ -342,6 +348,13 @@ export class Bridge implements HubBackend {
     this.startedAt = Date.now();
     const down = [...this.ims.values()].filter((l) => l.state === 'down');
     if (down.length) this.tellOwners(down.map((l) => this.downNotice(l)).join('\n'));
+    const missed = [...this.ims.values()].filter((l) => !l.im.replaysMissed).map((l) => l.platform);
+    if (downSince && missed.length) {
+      const gap = duration(this.startedAt - downSince.at);
+      this.tellOwners(
+        `🔄 The bridge is back after ${downSince.clean ? `${gap} stopped` : `an unexpected stop (its last activity was ${gap} ago)`}. Messages sent to the bot on ${missed.join(', ')} while it was not running never reached it, so they got no answer: please send anything unanswered again.`,
+      );
+    }
     this.housekeeping = setInterval(() => void this.cleanUp(), HOUSEKEEPING_MS);
     this.housekeeping.unref();
     this.firstCleanUp = setTimeout(() => void this.cleanUp(), FIRST_HOUSEKEEPING_MS);
@@ -374,7 +387,20 @@ export class Bridge implements HubBackend {
     }
     await this.tools.stop();
     await new Promise<void>((resolve) => (this.http ? this.http.close(() => resolve()) : resolve()));
+    // Last, so the next start finds it newest and knows this run ended cleanly (see lastRun).
+    this.trace('-', 'bridge', 'bridge', { state: 'stopped' });
     await this.flushWrites();
+  }
+
+  /**
+   * When the previous run ended, from the audit trail: its `stopped` entry (clean), or else its newest entry of any
+   * kind (it crashed or was killed). Undefined on a first start.
+   */
+  private async lastRun(): Promise<{ at: number; clean: boolean } | undefined> {
+    const [last] = await this.store.readTrace({ limit: 1 });
+    if (!last) return undefined;
+    const clean = last.kind === 'bridge' && (JSON.parse(last.detail) as { state?: string } | null)?.state === 'stopped';
+    return { at: last.ts, clean };
   }
 
   /**
@@ -546,13 +572,41 @@ export class Bridge implements HubBackend {
 
   // ───────────────────────── inbound ─────────────────────────
 
+  /**
+   * Route one message from an IM. A message addressed to the bot (a DM, a mention, a reply to it) always gets an
+   * answer: the agent's, or why it was not passed on and what to do instead. Anything else that goes nowhere stays
+   * silent, so the bot never chatters in a busy channel; other bots' messages never get here (the adapters drop
+   * them), so two bots cannot answer each other forever.
+   */
   async handleInbound(msg: InboundMessage) {
     const person = this.person(msg.platform, msg.userId);
     const thread: ThreadRef = { platform: msg.platform, channelId: msg.channelId, threadId: msg.threadId, isDM: msg.isDM };
+    try {
+      await this.routeInbound(msg, thread, person);
+    } catch (err) {
+      if (msg.isDM || msg.mentioned) {
+        // Only people from `people` see the error itself; anyone else could learn about the setup from it.
+        const why = person ? `: ${this.redactor.redact(String((err as Error)?.message ?? err))}` : '';
+        await this.notify(thread, `⚠️ Something went wrong with this message, so it was not passed on${why}. Please try again; the bridge's log has the details.`);
+      }
+      throw err;
+    }
+  }
+
+  private async routeInbound(msg: InboundMessage, thread: ThreadRef, person: { id: string; trust: TrustLevel } | undefined) {
     const key = msg.isDM ? dmKey(msg.platform, msg.userId) : `${msg.platform}:${msg.channelId}:${msg.threadId}`;
+    const addressed = msg.isDM || msg.mentioned;
 
     // Someone not in `people` is known by their platform id, the same id their turns use as initiator.
     const senderId = person?.id ?? `${msg.platform}:${msg.userId}`;
+    // Nothing the agent could read (a sticker, a voice note…): it never reaches an agent.
+    if (msg.unreadable && !msg.text.trim() && !msg.files?.length) {
+      this.trace(key, 'ignored', senderId, { unreadable: msg.unreadable });
+      if (!addressed) return;
+      if (person) await this.send(thread, `I can't read ${msg.unreadable}. Please send it as text${msg.platform === 'telegram' ? '' : ' or a file'}.`);
+      else await this.tellStranger(thread, msg);
+      return;
+    }
     // A reply someone is waiting for (ask_human / approval) never starts a new turn.
     const waited = this.offerToWaiters(key, senderId, msg.text);
     if (waited === 'consumed') return;
@@ -567,12 +621,15 @@ export class Bridge implements HubBackend {
       session = undefined;
     }
 
-    const match = this.router.matchInbound(msg, { personId: person?.id, threadAgent: session?.agent });
+    const explained = this.router.explainInbound(msg, { personId: person?.id, threadAgent: session?.agent });
+    const match = explained.match;
     if (!match) {
       this.trace(key, 'ignored', senderId, { text: msg.text });
-      if (!person && (msg.isDM || msg.mentioned)) {
+      if (!addressed) return;
+      if (!person) {
         this.log(`ignored ${msg.platform} user ${msg.userId} — not in people: (add  ${msg.platform}: ${msg.userId}  to a person)`);
       }
+      await this.explainIgnored(thread, msg, person !== undefined, explained.reachable, explained.addressed);
       return;
     }
 
@@ -593,9 +650,12 @@ export class Bridge implements HubBackend {
     const trust: TrustLevel = person?.trust ?? 'external';
     const budgetUsd = this.policies.budgetUsd(match.agent);
     this.trace(key, 'inbound', senderId, { route: match.index, agent: match.agent, text: match.text });
+    // Something is already running (or waiting) in this conversation: this message waits its turn, and says so
+    // once it has its place, so a slow note never lets a later message overtake it.
+    const queued = this.chains.has(key) ? this.queuedNote(key, match.agent) : undefined;
     // The message takes its place in the thread's queue now; attachments download when its turn comes, so a
     // big file never lets a later message overtake it.
-    this.schedule(key, thread.platform, async () => {
+    this.schedule(key, thread.platform, this.reporting(thread, match.agent, async () => {
       const envelope = newEnvelope({
         sender: { kind: 'person', id: senderId, platform: msg.platform, platformUserId: msg.userId, displayName: msg.userName },
         sessionKey: key,
@@ -609,7 +669,68 @@ export class Bridge implements HubBackend {
       const job: Job = { sessionKey: key, agent: match.agent, text: match.text, envelope, thread };
       await this.store.enqueue(envelope.id, key, job);
       await this.runJob(job);
-    });
+    }));
+    if (queued) await this.notify(thread, queued);
+  }
+
+  /**
+   * What a message that waits behind the conversation's work in progress is told: whose turn it waits for, and
+   * when that turn itself waits for a person (an approval, a question), that answering it lets the queue move on.
+   */
+  private queuedNote(key: string, agent: string): string {
+    const running = [...this.active.values()].find((c) => c.sessionKey === key)?.agent;
+    if (!running) return `⏳ Queued: ${agent} gets this once the work in progress in this conversation is done.`;
+    const head = `⏳ Queued: ${agent} gets this after ${running}'s current turn in this conversation`;
+    if ([...this.choices.values()].some((c) => c.key === key)) {
+      return `${head}, which is waiting for a decision above. Approve or deny it to go on; until then nothing else here runs.`;
+    }
+    if (this.waiters.has(key)) return `${head}, which is waiting for an answer to its question above. Answer it to go on.`;
+    return `${head} ends.`;
+  }
+
+  /**
+   * Tell someone who addressed the bot why their message was not passed on. People from `people` hear which agents
+   * here take their messages; anyone else hears only that the bot answers the people it is set up for, at most once
+   * per STRANGER_NOTE_MS, so the reply reveals nothing about the setup and cannot flood a channel.
+   */
+  private async explainIgnored(thread: ThreadRef, msg: InboundMessage, known: boolean, reachable: string[], named?: string) {
+    if (!reachable.length) {
+      if (known) await this.send(thread, "No agent here takes messages from you, so this was not passed on. Ask the bridge's owner if you need access.");
+      else await this.tellStranger(thread, msg);
+      return;
+    }
+    // Some route here takes this sender's messages: only how the message was addressed kept it from matching.
+    const names = reachable.map((a) => `\`${a}\``);
+    const list = names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} or ${names.at(-1)}`;
+    const example = `for example "${reachable[0]}, ${msg.isDM ? 'what can you do?' : 'summarise this thread'}"`;
+    const lead = named && !reachable.includes(named) ? `\`${named}\` doesn't take messages from you here.` : 'Which agent is this for?';
+    await this.send(thread, `${lead} Start your message with ${list}, ${example}.`);
+  }
+
+  /** The one line someone outside `people` hears, at most once per STRANGER_NOTE_MS per person. */
+  private async tellStranger(thread: ThreadRef, msg: InboundMessage) {
+    const who = `${msg.platform}:${msg.userId}`;
+    const now = Date.now();
+    const last = this.strangerNotes.get(who);
+    if (last !== undefined && now - last < STRANGER_NOTE_MS) return;
+    for (const [k, at] of this.strangerNotes) if (now - at >= STRANGER_NOTE_MS) this.strangerNotes.delete(k);
+    this.strangerNotes.set(who, now);
+    await this.send(thread, `I only answer people this bridge is set up for. To get access, ask its owner to add your ${msg.platform} id ${msg.userId}.`);
+  }
+
+  /**
+   * A queued step of a conversation (a message's turn, a resumed one) that fails outside the turn itself, say while
+   * saving it or fetching its files, is reported in the thread as well as logged.
+   */
+  private reporting(thread: ThreadRef, agent: string, fn: () => Promise<void>): () => Promise<void> {
+    return async () => {
+      try {
+        await fn();
+      } catch (err) {
+        await this.notify(thread, `⚠️ ${agent} could not take this message: ${this.redactor.redact(String((err as Error)?.message ?? err))}`);
+        throw err;
+      }
+    };
   }
 
   /** status / merge / discard on the conversation's branch. Runs in the thread's queue, so never mid-turn. */
@@ -688,9 +809,20 @@ export class Bridge implements HubBackend {
     const ttl = parseDuration(this.cfg.defaults.offline_queue_ttl);
     for (const row of await this.store.takePending(ttl)) {
       const job = JSON.parse(row.payload) as Job;
+      if (row.status === 'expired') {
+        this.log(`queued message ${row.id} for ${job.agent} expired (older than offline_queue_ttl ${this.cfg.defaults.offline_queue_ttl})`);
+        this.trace(job.sessionKey, 'expired', job.agent, { id: row.id });
+        this.schedule(job.sessionKey, job.thread.platform, () =>
+          this.notify(
+            job.thread,
+            `⌛ A message to ${job.agent} waited longer than ${this.cfg.defaults.offline_queue_ttl} while the bridge was unavailable, so it was dropped: "${clip(job.text, 80)}". Send it again if it is still needed.`,
+          ),
+        );
+        continue;
+      }
       if (row.status === 'pending') {
         this.log(`running queued message ${row.id} for ${job.agent}`);
-        this.schedule(job.sessionKey, job.thread.platform, () => this.runJob(job));
+        this.schedule(job.sessionKey, job.thread.platform, this.reporting(job.thread, job.agent, () => this.runJob(job)));
         continue;
       }
       const interrupted = (job.interrupted ?? 0) + 1;
@@ -699,7 +831,7 @@ export class Bridge implements HubBackend {
       // is still given up after MAX_RESUMES.
       await this.store.markRunning(row.id, resumed);
       this.log(`resuming interrupted turn ${row.id} for ${job.agent} (attempt ${interrupted})`);
-      this.schedule(job.sessionKey, job.thread.platform, async () => {
+      this.schedule(job.sessionKey, job.thread.platform, this.reporting(job.thread, job.agent, async () => {
         if (interrupted > MAX_RESUMES) {
           await this.store.finish(row.id, 'failed');
           await this.notify(job.thread, `⚠️ ${job.agent}'s turn was interrupted ${interrupted} times by bridge restarts, so I stopped retrying. Send the request again to restart it.`);
@@ -708,7 +840,7 @@ export class Bridge implements HubBackend {
         if (this.stopping) return; // still queued as running: resumes on the next start
         await this.notify(job.thread, `🔁 The bridge restarted in the middle of ${job.agent}'s turn — resuming.`);
         await this.runJob(resumed);
-      });
+      }));
     }
   }
 
@@ -798,7 +930,12 @@ export class Bridge implements HubBackend {
     }
 
     if (outcome.ok) {
-      await this.post(thread, outcome.text, placeholder).catch((err) => this.warn(`reply to ${sessionKey} not delivered: ${(err as Error).message}`));
+      await this.post(thread, outcome.text, placeholder).catch((err) => {
+        // The asker sees no answer and the thread can't be reached: the owners hear it on another way in.
+        const why = `${agent}'s reply in ${sessionKey} was not delivered: ${(err as Error).message}`;
+        this.warn(why);
+        this.tellOwners(`⚠️ ${why}. The reply is in the audit trail.`);
+      });
       await this.store.finish(job.envelope.id, 'done');
     } else if (this.stopping) {
       // Cut off by shutdown: the queue row stays `running`, so the next start resumes the turn.
@@ -1180,6 +1317,7 @@ export class Bridge implements HubBackend {
         }
         const answer = await waiting.answer;
         if (answer) return { text: answer.text };
+        if (!ctx.controller.signal.aborted) await this.notify(ctx.thread, `⌛ No answer within ${minutes} minutes: ${ctx.agent} carries on without it.`);
         return { text: ctx.controller.signal.aborted ? 'this turn has ended' : `no answer within ${minutes} minutes`, isError: true };
       }
       case 'delegate':
@@ -1817,6 +1955,12 @@ class BudgetRefusal extends Error {
   }
 }
 
+/** `text` on one line, cut to `max` characters. */
+function clip(text: string, max: number): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
 /** 90000 → "2 min", 30000 → "30 s". */
 /** Whether messages can go out on this IM (a reconnecting one still sends). */
 function sending(link: ImConnection): boolean {
@@ -1824,5 +1968,7 @@ function sending(link: ImConnection): boolean {
 }
 
 function duration(ms: number): string {
+  if (ms >= 2 * 86400e3) return `${Math.round(ms / 86400e3)} days`;
+  if (ms >= 2 * 3600e3) return `${Math.round(ms / 3600e3)} h`;
   return ms >= 60e3 ? `${Math.round(ms / 60e3)} min` : `${Math.max(1, Math.round(ms / 1e3))} s`;
 }

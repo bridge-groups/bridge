@@ -118,6 +118,7 @@ export class FeishuAdapter implements ImAdapter {
       /* keep empty */
     }
     let text = '';
+    let unreadable: string | undefined;
     const files: InboundFile[] = [];
     switch (m.message_type) {
       case 'text':
@@ -155,8 +156,11 @@ export class FeishuAdapter implements ImAdapter {
       case 'media':
         files.push(this.file(m.message_id, content.file_key, 'file', content.file_name ?? content.file_key));
         break;
+      case 'system':
+        return undefined; // join and leave notices
       default:
-        return undefined; // stickers, cards, system messages…
+        // Stickers, cards, shared chats…: the bridge tells the sender when it was meant for the bot.
+        unreadable = Object.hasOwn(UNREADABLE, m.message_type) ? UNREADABLE[m.message_type] : `${String(m.message_type)} messages`;
     }
 
     const isDM = m.chat_type === 'p2p';
@@ -171,6 +175,7 @@ export class FeishuAdapter implements ImAdapter {
       threadId: m.root_id || m.message_id,
       messageId: m.message_id,
       files,
+      ...(unreadable ? { unreadable } : {}),
     };
   }
 
@@ -227,3 +232,15 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
   for await (const c of stream) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
   return Buffer.concat(chunks);
 }
+
+/** How the sender is told about a message type the adapter does not read. */
+const UNREADABLE: Record<string, string> = {
+  sticker: 'stickers',
+  interactive: 'cards',
+  share_chat: 'shared groups',
+  share_user: 'shared contacts',
+  merge_forward: 'forwarded chat records',
+  location: 'locations',
+  todo: 'tasks',
+  vote: 'polls',
+};

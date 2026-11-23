@@ -65,8 +65,9 @@ test('unknown sender is ignored (deny by default)', async () => {
   try {
     im.receive({ userId: 'U9', text: 'hello' });
     await bridge.idle();
-    assert.equal(im.sent.length, 0);
-    assert.equal(store.readTrace()[0]?.kind, 'ignored');
+    assert.equal(im.sent.length, 1, 'only the generic note (answers.test.ts)');
+    assert.doesNotMatch(im.sent[0]!.text, /echo/);
+    assert.equal(store.readTrace().find((r) => r.kind !== 'bridge')?.kind, 'ignored');
   } finally {
     await done();
   }

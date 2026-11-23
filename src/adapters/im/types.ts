@@ -56,4 +56,9 @@ export interface ImAdapter {
   notifyUser?(channelId: string, userId: string, text: string): Promise<void>;
   /** Longest text one message can carry; the bridge splits longer replies. */
   readonly maxTextLength: number;
+  /**
+   * Messages sent while the bridge was not running arrive once it starts (Telegram keeps them for a day). Adapters
+   * whose platform drops them leave this out, and the owners are told after a restart to resend what got no answer.
+   */
+  readonly replaysMissed?: boolean;
 }

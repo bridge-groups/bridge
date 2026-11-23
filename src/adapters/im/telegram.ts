@@ -27,6 +27,8 @@ interface TelegramState {
 export class TelegramAdapter implements ImAdapter {
   readonly platform = 'telegram';
   readonly maxTextLength = 4000;
+  /** Telegram keeps unconfirmed updates for a day. */
+  readonly replaysMissed = true;
   private readonly api: string;
   private readonly stateFile?: string;
   private username = '';
@@ -108,7 +110,9 @@ export class TelegramAdapter implements ImAdapter {
 
   private parse(m: any): InboundMessage | undefined {
     const raw: string = m.text ?? m.caption ?? '';
-    if (!raw) return undefined;
+    // Without text there is nothing to pass on; the bridge tells the sender when it was meant for the bot.
+    const kind = raw ? undefined : UNREADABLE.find(([field]) => m[field] !== undefined);
+    if (!raw && !kind) return undefined; // service messages: joins, pins, title changes…
     const chatId = String(m.chat.id);
     const isDM = m.chat.type === 'private';
     const tag = `@${this.username}`;
@@ -128,6 +132,7 @@ export class TelegramAdapter implements ImAdapter {
       mentioned: raw.includes(tag) || repliesToBot,
       threadId,
       messageId,
+      ...(kind ? { unreadable: kind[1] } : {}),
     };
   }
 
@@ -173,3 +178,18 @@ export class TelegramAdapter implements ImAdapter {
     return json.result;
   }
 }
+
+/** Message fields that carry content the adapter does not read, and how the sender is told about it. */
+const UNREADABLE: [string, string][] = [
+  ['sticker', 'stickers'],
+  ['photo', 'photos without a caption'],
+  ['voice', 'voice messages'],
+  ['audio', 'audio files'],
+  ['video', 'videos'],
+  ['video_note', 'video messages'],
+  ['animation', 'GIFs'],
+  ['document', 'files'],
+  ['location', 'locations'],
+  ['contact', 'contacts'],
+  ['poll', 'polls'],
+];

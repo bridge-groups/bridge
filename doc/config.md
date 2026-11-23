@@ -71,6 +71,14 @@ A message reaches an agent only through a route (deny by default).
   500 characters each, from the audit trail).
 - A reply in a thread the agent already holds needs no mention.
 - `reset` / `/new` starts fresh sessions for the thread, for every agent in it.
+- A message meant for the bot (a DM, a mention, a reply to it) is always answered. When no route takes it, someone in
+  `people` hears which agents here take their messages (`Start your message with \`claude-code\` or \`codex\``),
+  or that none do. Anyone else hears one line that names no agent, at most once a day: the bot only answers people
+  it is set up for, and the id to add for them. A message that has to wait for a turn in progress is answered
+  `⏳ Queued`, saying whose turn it waits for and, when that turn waits for an approval or an answer, that answering
+  it lets the conversation go on (until then nothing else in it runs, not even another agent); a sticker or other content the IM adapter can't pass on is answered `I can't read …`. Messages not
+  meant for the bot that no route takes get no reply, so a busy channel never hears from it; other bots' messages
+  are dropped by the IM adapters, so two bots never answer each other. Every ignored message is in the audit trail.
 - An agent route (`from: <agent>`) lists what that agent may reach: other agents, and tools as `server.tool`
   globs.
 

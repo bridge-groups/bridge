@@ -104,3 +104,26 @@ test('telegram: offset is confirmed on stop and persisted, reply chains survive 
     await tg.close();
   }
 });
+
+test('telegram: a sticker or photo without text is passed on as unreadable; service messages are dropped', async () => {
+  const tg = await fakeTelegram();
+  const got: InboundMessage[] = [];
+  const a = new TelegramAdapter({ botToken: 'T', apiBase: tg.apiBase });
+  try {
+    await a.start((m) => got.push(m));
+    const base = (update: number, id: number, extra: object) => ({
+      update_id: update,
+      message: { message_id: id, chat: { id: 7, type: 'private' }, from: { id: 1, username: 'alice' }, ...extra },
+    });
+    tg.push(
+      base(20, 200, { new_chat_members: [{ id: 3 }] }),
+      base(21, 201, { sticker: { file_id: 's' } }),
+      base(22, 202, { photo: [{ file_id: 'p' }], caption: 'look' }),
+    );
+    await until(() => got.length === 2, 'two messages');
+    assert.deepEqual(got.map((m) => [m.text, m.unreadable, m.isDM]), [['', 'stickers', true], ['look', undefined, true]]);
+  } finally {
+    await a.stop();
+    await tg.close();
+  }
+});
