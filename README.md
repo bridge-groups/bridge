@@ -240,7 +240,7 @@ Housekeeping runs a minute after start and then every 6 hours. It deletes:
 Writes must be same-origin JSON and requests must carry a loopback `Host`, so other web pages and DNS-rebinding
 tricks can't drive it. `bridge status`, `bridge sessions` and `bridge trace` show the same from the terminal.
 
-## Not in v0.1 yet
+## Not built yet
 
 - An A2A server: bridge agents reachable by other A2A clients (the bridge is an A2A client today)
 - A hosted service built on the library: one bridge per user, Slack apps installed into many workspaces over HTTP

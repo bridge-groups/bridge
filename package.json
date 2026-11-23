@@ -2,7 +2,7 @@
   "name": "@bridge-groups/bridge",
   "type": "module",
   "license": "MIT",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Connect agents to IM, to other agents, and to tools: a library to embed in an app or service, and a CLI for your own machine.",
   "repository": {
     "type": "git",
