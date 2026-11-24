@@ -23,11 +23,13 @@ keychain, a local dashboard. To embed the bridge in an app or service instead, u
 Needs Node 24 or later.
 
 ```bash
-npm install && npm run output && npm link  # puts `bridge` on your PATH
+npm install -g @bridge-groups/bridge   # puts `bridge` on your PATH
 bridge init              # writes ~/.config/bridge/bridge.yaml with a local echo agent
 bridge check             # problems with line numbers, the file's tests, what an edit changes
 bridge chat --as me      # talk to your routes from the terminal
 ```
+
+From a clone instead: `npm install && npm run output && npm link`.
 
 Then add an IM, a real agent and a tool server:
 

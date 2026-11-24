@@ -38,6 +38,7 @@ import { localBaseUrl, parseDuration, sessionSlug } from './core/address.ts';
 import { CONFIG_FILE, DATA_DIR, TEMP_DIR } from './paths.ts';
 import { installService, restartService, serviceStatus, uninstallService } from './service.ts';
 import { stampLines } from './stamps.ts';
+import { VERSION } from './core/version.ts';
 
 const HELP = `bridge — connect agents to IM, to each other, and to tools
 
@@ -68,37 +69,51 @@ Usage: bridge <command> [options]
   sessions [-n 50]         list recent conversations
   trace [--session <key>] [-n 50]
                            show the audit trail
+  version                  print the version (also -v, --version)
+  help                     print this help (also -h, --help)
 
 Options: -c, --config <path>   (default ${CONFIG_FILE})
 
 Files: config ${CONFIG_FILE}; data ${DATA_DIR}; temporary files ${TEMP_DIR}
 `;
 
-async function main() {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-      config: { type: 'string', short: 'c', default: CONFIG_FILE },
-      as: { type: 'string' },
-      from: { type: 'string' },
-      sender: { type: 'string' },
-      text: { type: 'string', default: '' },
-      mention: { type: 'boolean', default: false },
-      dm: { type: 'boolean', default: false },
-      session: { type: 'string' },
-      limit: { type: 'string', short: 'n', default: '50' },
-      force: { type: 'boolean', default: false },
-      'sign-out': { type: 'boolean', default: false },
-      'older-than': { type: 'string', default: '7d' },
-      json: { type: 'boolean', default: false },
-      apply: { type: 'boolean', default: false },
-      help: { type: 'boolean', short: 'h' },
-    },
-  });
-  const [cmd, sub, arg] = positionals;
-  const configPath = resolve(values.config!);
+/** The command line, or a one-line error naming the bad option instead of Node's stack trace. */
+function parseCli() {
+  try {
+    return parseArgs({ allowPositionals: true, options: OPTIONS });
+  } catch (err) {
+    // Node's message adds advice about positionals that start with '-'; the first sentence names the problem.
+    const message = String((err as Error).message).split('. ')[0];
+    return fail(`${message}. Run "bridge --help" for the commands and options.`);
+  }
+}
 
-  if (!cmd || values.help) return void process.stdout.write(HELP);
+const OPTIONS = {
+  config: { type: 'string', short: 'c', default: CONFIG_FILE },
+  as: { type: 'string' },
+  from: { type: 'string' },
+  sender: { type: 'string' },
+  text: { type: 'string', default: '' },
+  mention: { type: 'boolean', default: false },
+  dm: { type: 'boolean', default: false },
+  session: { type: 'string' },
+  limit: { type: 'string', short: 'n', default: '50' },
+  force: { type: 'boolean', default: false },
+  'sign-out': { type: 'boolean', default: false },
+  'older-than': { type: 'string', default: '7d' },
+  json: { type: 'boolean', default: false },
+  apply: { type: 'boolean', default: false },
+  help: { type: 'boolean', short: 'h' },
+  version: { type: 'boolean', short: 'v' },
+} as const;
+
+async function main() {
+  const { values, positionals } = parseCli();
+  const [cmd, sub, arg] = positionals;
+  const configPath = resolve(values.config);
+
+  if (values.version || cmd === 'version') return void console.log(VERSION);
+  if (!cmd || values.help || cmd === 'help') return void process.stdout.write(HELP);
 
   switch (cmd) {
     case 'init': {
